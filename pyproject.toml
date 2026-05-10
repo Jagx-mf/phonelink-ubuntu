@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "phonelink-ubuntu"
+version = "0.1.0"
+description = "Interface GTK4/Adwaita pour contrôler un téléphone Android depuis GNOME Ubuntu"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "GPL-3.0-or-later" }
+
+# PyGObject est une dépendance système (apt), pas PyPI.
+# Elle n'est pas listée ici pour éviter les conflits.
+dependencies = []
+
+[project.scripts]
+phonelink-ubuntu = "main:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
