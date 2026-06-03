@@ -12,14 +12,16 @@ de la stack Bluetooth/audio. Elle orchestre des outils système existants
 main.py                    → Point d'entrée, Adw.Application / Gtk.Application
 app/
   ui/
-    main_window.py         → Fenêtre principale (status + actions)
+    main_window.py         → Fenêtre principale (status + actions + ADB Wi-Fi)
+    gallery_window.py      → Galerie photo intégrée (miniatures locales)
     widgets.py             → Helpers UI partagés (show_dialog)
   core/
     bluetooth.py           → bluetoothctl
     audio.py               → pactl
-    adb.py                 → adb
+    adb.py                 → adb (USB + Wi-Fi : tcpip / connect / disconnect)
     scrcpy.py              → scrcpy
-    photos.py              → adb pull + xdg-open
+    photos.py              → adb pull + listing local + xdg-open
+    config.py              → config persistante JSON (~/.config/phonelink-ubuntu)
     system_checks.py       → vérification de tous les outils
   utils/
     commands.py            → subprocess wrapper (jamais shell=True)
@@ -70,6 +72,48 @@ app/
 | libadwaita 1.x  | AdwApplicationWindow, PreferencesPage | Gtk.ApplicationWindow + Gtk.Box |
 | GTK 4.x         | minimum requis | –                              |
 | Python 3.11+    | union types    | –                              |
+
+## Connectivité : ce qui marche avec ou sans câble
+
+PhoneLink combine deux canaux indépendants : **Bluetooth** (audio/appels) et
+**ADB** (écran, photos, fichiers). Aucun des deux ne couvre tout seul l'ensemble
+des usages.
+
+| Fonction                       | USB (câble) | Sans câble                         |
+|--------------------------------|-------------|------------------------------------|
+| Audio A2DP / appels HSP/HFP    | –           | ✅ Bluetooth                        |
+| Reconnexion / scan Bluetooth   | –           | ✅ Bluetooth                        |
+| Affichage écran (scrcpy)       | ✅ ADB USB  | ✅ ADB Wi-Fi                        |
+| Import photos (`adb pull`)     | ✅ ADB USB  | ✅ ADB Wi-Fi                        |
+| Galerie photo intégrée         | ✅ (photos déjà importées) | ✅ (photos déjà importées) |
+
+### Limite du Bluetooth pur
+
+Le Bluetooth tel qu'utilisé ici sert **uniquement à l'audio** (profils A2DP et
+HSP/HFP). Il ne permet **pas** de parcourir la galerie Android ni de récupérer
+des photos : ces opérations passent obligatoirement par ADB. L'app
+n'implémente pas de transfert OBEX/MTP par Bluetooth.
+
+### Méthode recommandée sans câble : ADB over Wi-Fi
+
+Pour les photos et l'écran sans câble, la voie recommandée est **ADB over
+Wi-Fi** :
+
+1. **Bootstrap initial** — soit brancher le téléphone une fois en USB et cliquer
+   « Activer TCP/IP (via USB) » (`adb tcpip 5555`), soit activer le **débogage
+   sans fil** d'Android (Options développeurs) pour s'appairer sans câble.
+2. Saisir l'IP du téléphone puis « Connecter ADB Wi-Fi » (`adb connect IP:5555`).
+3. Import photos et scrcpy fonctionnent alors sans câble.
+
+Le téléphone et l'ordinateur doivent être sur le même réseau Wi-Fi. L'IP et le
+port (5555 par défaut) sont mémorisés dans la config persistante.
+
+### Galerie photo intégrée
+
+`gallery_window.py` affiche, sous forme de miniatures, **les photos déjà
+importées localement** dans `~/Images/PhoneLinkUbuntu` (chemin XDG Pictures). Le
+clic ouvre la photo via `xdg-open`. La galerie ne lit pas le téléphone en direct :
+elle reflète uniquement le contenu importé par `adb pull`.
 
 ## Sécurité
 

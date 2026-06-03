@@ -85,6 +85,40 @@ adb shell ls /sdcard/DCIM/
 
 Si le téléphone demande une autorisation d'accès aux fichiers, acceptez-la.
 
+> Rappel : les photos passent par ADB, **pas** par Bluetooth. Le Bluetooth ne
+> sert qu'à l'audio/appels et ne permet pas de parcourir la galerie Android.
+
+---
+
+## ADB Wi-Fi — la connexion sans câble échoue
+
+L'accès sans câble (photos, scrcpy) passe par **ADB over Wi-Fi**. Il faut un
+bootstrap initial avant de pouvoir se connecter en Wi-Fi.
+
+```bash
+# 1. Brancher le téléphone en USB (débogage activé), vérifier la connexion
+adb devices            # doit afficher "<serial>  device"
+
+# 2. Basculer en TCP/IP (bouton « Activer TCP/IP (via USB) »)
+adb tcpip 5555
+
+# 3. Récupérer l'IP Wi-Fi du téléphone, puis débrancher le câble
+adb shell ip -f inet addr show wlan0    # cherchez "inet 192.168.x.x"
+
+# 4. Se connecter sans câble
+adb connect 192.168.x.x:5555            # doit répondre "connected to ..."
+```
+
+Alternative sans aucun câble : activer le **débogage sans fil** dans les Options
+développeurs Android, puis utiliser l'appairage sans fil du téléphone.
+
+Points à vérifier :
+- Téléphone et PC sur **le même réseau Wi-Fi**.
+- `adb connect` renvoie 0 même en cas d'échec : fiez-vous au message
+  ("connected" = succès).
+- Après un redémarrage du téléphone, le mode TCP/IP est perdu → refaire le
+  bootstrap USB.
+
 ---
 
 ## Erreur "ModuleNotFoundError: gi" ou "cannot import gi"

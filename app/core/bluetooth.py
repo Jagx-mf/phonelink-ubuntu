@@ -10,12 +10,42 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+# bluetoothctl `Icon:` values that are never an Android phone.
+_NON_PHONE_ICONS = frozenset({
+    "input-gaming", "input-mouse", "input-keyboard", "input-tablet",
+    "audio-headset", "audio-headphones", "audio-card", "audio-speakers",
+    "computer", "video-display", "printer", "scanner", "camera-video",
+})
+
+# Substrings in a device name that mark an obvious non-phone peripheral.
+_NON_PHONE_KEYWORDS = (
+    "xbox", "controller", "gamepad", "joystick", "joy-con", "dualshock",
+    "dualsense", "mouse", "keyboard", "trackpad", "headphone", "headset",
+    "earbud", "earbuds", "buds", "airpod", "speaker", "soundbar",
+    "watch", "band", " tv", "display", "printer",
+)
+
+
 @dataclass
 class BluetoothDevice:
     mac: str
     name: str
     connected: bool = False
     paired: bool = True
+    icon: str = ""
+
+    @property
+    def is_excluded(self) -> bool:
+        """True if this device is an obvious non-phone peripheral."""
+        if self.icon in _NON_PHONE_ICONS:
+            return True
+        low = self.name.lower()
+        return any(kw in low for kw in _NON_PHONE_KEYWORDS)
+
+    @property
+    def is_phone(self) -> bool:
+        """True only when the device positively identifies as a phone."""
+        return self.icon == "phone" and not self.is_excluded
 
 
 def get_paired_devices() -> list[BluetoothDevice]:
@@ -27,8 +57,16 @@ def get_paired_devices() -> list[BluetoothDevice]:
         if not m:
             continue
         mac, name = m.group(1).upper(), m.group(2)
-        devices.append(BluetoothDevice(mac=mac, name=name, connected=is_connected(mac)))
-    logger.debug("paired: %s", [d.mac for d in devices])
+        # One `info` call gives us connection state *and* the device icon.
+        info = get_device_info(mac)
+        devices.append(BluetoothDevice(
+            mac=mac,
+            name=info.get("alias") or info.get("name") or name,
+            connected=bool(info.get("connected")),
+            paired=bool(info.get("paired", True)),
+            icon=info.get("icon", ""),
+        ))
+    logger.debug("paired: %s", [(d.mac, d.icon) for d in devices])
     return devices
 
 
@@ -58,6 +96,8 @@ def get_device_info(mac: str) -> dict:
             info["name"] = line.split(":", 1)[1].strip()
         elif line.startswith("Alias:"):
             info["alias"] = line.split(":", 1)[1].strip()
+        elif line.startswith("Icon:"):
+            info["icon"] = line.split(":", 1)[1].strip()
         elif line.startswith("Connected:"):
             info["connected"] = "yes" in line
         elif line.startswith("Paired:"):

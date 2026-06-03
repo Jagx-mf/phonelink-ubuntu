@@ -20,6 +20,8 @@ from app.core import adb as adb_core
 from app.core import scrcpy as scrcpy_core
 from app.core import photos as photos_core
 from app.core import system_checks
+from app.core.config import PhoneLinkConfig, load_config, save_config
+from app.ui.gallery_window import GalleryWindow
 from app.ui.widgets import show_dialog
 from app.utils.commands import launch_background, is_installed
 from app.utils.logger import get_logger
@@ -42,7 +44,9 @@ class MainWindow(_Base):
         self.set_title("PhoneLink Ubuntu")
         self.set_default_size(480, 720)
 
-        self._phone_mac: str = ""
+        self._config = load_config()
+        self._phone_mac: str = self._config.phone_mac
+        self._phone_name: str = self._config.phone_name or PHONE_NAME
 
         # Status value labels (set during _build_ui)
         self._val_phone: Optional[Gtk.Label] = None
@@ -52,6 +56,9 @@ class MainWindow(_Base):
         self._val_sink: Optional[Gtk.Label] = None
         self._val_adb: Optional[Gtk.Label] = None
         self._val_scrcpy: Optional[Gtk.Label] = None
+
+        # ADB Wi-Fi host entry (set during _build_ui)
+        self._wifi_host_entry: Optional[Gtk.Entry] = None
 
         self._build_ui()
         # First refresh slightly deferred so the window renders first
@@ -87,7 +94,7 @@ class MainWindow(_Base):
         status_group.set_description("Rafraîchi automatiquement au démarrage")
         page.add(status_group)
 
-        self._val_phone   = self._adw_status_row(status_group, "Téléphone",      PHONE_NAME)
+        self._val_phone   = self._adw_status_row(status_group, "Téléphone",      self._phone_name)
         self._val_bt      = self._adw_status_row(status_group, "Bluetooth",       "Vérification…")
         self._val_profile = self._adw_status_row(status_group, "Profil audio BT", "…")
         self._val_source  = self._adw_status_row(status_group, "Micro Ubuntu",    "…")
@@ -108,6 +115,7 @@ class MainWindow(_Base):
             ("Mode appel — guide",          "phone-symbolic",                      self._on_call_mode),
             ("Afficher téléphone (scrcpy)", "video-display-symbolic",              self._on_scrcpy),
             ("Importer photos",             "camera-photo-symbolic",               self._on_import_photos),
+            ("Galerie photos",              "image-x-generic-symbolic",            self._on_open_gallery),
             ("Ouvrir dossier photos",       "folder-pictures-symbolic",            self._on_open_photos),
             ("Diagnostic système",          "computer-symbolic",                   self._on_diagnostic),
         ]
@@ -120,6 +128,36 @@ class MainWindow(_Base):
             row.add_prefix(Gtk.Image.new_from_icon_name(icon_name))
             row.add_suffix(Gtk.Image.new_from_icon_name("go-next-symbolic"))
             actions_group.add(row)
+
+        # ── ADB Wi-Fi group ──
+        wifi_group = Adw.PreferencesGroup()
+        wifi_group.set_title("ADB Wi-Fi")
+        wifi_group.set_description("Accès photos sans câble")
+        page.add(wifi_group)
+
+        host_row = Adw.ActionRow()
+        host_row.set_title("Adresse IP")
+        self._wifi_host_entry = Gtk.Entry()
+        self._wifi_host_entry.set_placeholder_text("192.168.1.x")
+        self._wifi_host_entry.set_valign(Gtk.Align.CENTER)
+        if self._config.adb_wifi_host:
+            self._wifi_host_entry.set_text(self._config.adb_wifi_host)
+        host_row.add_suffix(self._wifi_host_entry)
+        wifi_group.add(host_row)
+
+        wifi_actions = [
+            ("Connecter ADB Wi-Fi",      "network-wireless-symbolic", self._on_wifi_connect),
+            ("Déconnecter ADB Wi-Fi",    "network-offline-symbolic",  self._on_wifi_disconnect),
+            ("Activer TCP/IP (via USB)", "network-wired-symbolic",    self._on_wifi_enable_tcpip),
+        ]
+        for title, icon_name, callback in wifi_actions:
+            row = Adw.ActionRow()
+            row.set_title(title)
+            row.set_activatable(True)
+            row.connect("activated", callback)
+            row.add_prefix(Gtk.Image.new_from_icon_name(icon_name))
+            row.add_suffix(Gtk.Image.new_from_icon_name("go-next-symbolic"))
+            wifi_group.add(row)
 
     def _adw_status_row(self, group: "Adw.PreferencesGroup", title: str, value: str) -> Gtk.Label:
         """Add a read-only status row; return its value label."""
@@ -173,7 +211,7 @@ class MainWindow(_Base):
         content.append(grid)
 
         rows = [
-            ("Téléphone",      PHONE_NAME),
+            ("Téléphone",      self._phone_name),
             ("Bluetooth",      "Vérification…"),
             ("Profil audio BT","…"),
             ("Micro Ubuntu",   "…"),
@@ -216,8 +254,43 @@ class MainWindow(_Base):
             ("Mode appel — guide",          self._on_call_mode),
             ("Afficher téléphone (scrcpy)", self._on_scrcpy),
             ("Importer photos",             self._on_import_photos),
+            ("Galerie photos",              self._on_open_gallery),
             ("Ouvrir dossier photos",       self._on_open_photos),
             ("Diagnostic système",          self._on_diagnostic),
+        ]:
+            btn = Gtk.Button(label=label)
+            btn.set_hexpand(True)
+            btn.set_margin_top(2)
+            btn.connect("clicked", callback)
+            content.append(btn)
+
+        sep2 = Gtk.Separator()
+        sep2.set_margin_top(12)
+        sep2.set_margin_bottom(8)
+        content.append(sep2)
+
+        t3 = Gtk.Label(label="ADB Wi-Fi")
+        t3.add_css_class("title-3")
+        t3.set_halign(Gtk.Align.START)
+        content.append(t3)
+
+        host_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        host_box.set_margin_top(2)
+        host_label = Gtk.Label(label="Adresse IP :")
+        host_label.add_css_class("dim-label")
+        host_box.append(host_label)
+        self._wifi_host_entry = Gtk.Entry()
+        self._wifi_host_entry.set_placeholder_text("192.168.1.x")
+        self._wifi_host_entry.set_hexpand(True)
+        if self._config.adb_wifi_host:
+            self._wifi_host_entry.set_text(self._config.adb_wifi_host)
+        host_box.append(self._wifi_host_entry)
+        content.append(host_box)
+
+        for label, callback in [
+            ("Connecter ADB Wi-Fi",      self._on_wifi_connect),
+            ("Déconnecter ADB Wi-Fi",    self._on_wifi_disconnect),
+            ("Activer TCP/IP (via USB)", self._on_wifi_enable_tcpip),
         ]:
             btn = Gtk.Button(label=label)
             btn.set_hexpand(True)
@@ -238,10 +311,10 @@ class MainWindow(_Base):
     def _fetch_status(self):
         """Background: collect status data from all core modules."""
         paired = bt_core.get_paired_devices()
-        phone = _find_phone(paired)
+        phone = _find_phone(paired, self._config)
         bt_connected = phone.connected if phone else False
         mac = phone.mac if phone else ""
-        phone_name = phone.name if phone else PHONE_NAME
+        phone_name = phone.name if phone else (self._config.phone_name or PHONE_NAME)
 
         _, profile_raw = audio_core.get_bluetooth_card_profile()
         source = audio_core.get_active_source() or "Non détecté"
@@ -270,6 +343,8 @@ class MainWindow(_Base):
     ):
         """Apply fetched data to UI labels (must run on GTK main thread)."""
         self._phone_mac = mac
+        self._phone_name = phone_name
+        self._save_phone_config(mac, phone_name)
 
         self._val_phone.set_label(phone_name)
 
@@ -298,6 +373,21 @@ class MainWindow(_Base):
             GLib.idle_add(self._refresh_status)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _save_phone_config(self, mac: str, name: str) -> None:
+        """Persist the detected phone when it changes."""
+        if not mac:
+            return
+        next_config = PhoneLinkConfig(
+            phone_mac=mac,
+            phone_name=name,
+            adb_wifi_host=self._config.adb_wifi_host,
+            adb_wifi_port=self._config.adb_wifi_port,
+        )
+        if next_config == self._config:
+            return
+        self._config = next_config
+        save_config(next_config)
 
     def _on_reconnect(self, _):
         if not self._phone_mac:
@@ -358,10 +448,97 @@ class MainWindow(_Base):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _on_open_gallery(self, _):
+        gallery = GalleryWindow(parent=self)
+        gallery.present()
+
     def _on_open_photos(self, _):
         ok, msg = photos_core.open_local_folder()
         if not ok:
             show_dialog(self, "Erreur", msg, error=True)
+
+    # ── ADB Wi-Fi ──
+
+    def _wifi_host(self) -> str:
+        if self._wifi_host_entry is None:
+            return ""
+        return self._wifi_host_entry.get_text().strip()
+
+    def _save_wifi_config(self, host: str, port: int) -> None:
+        """Persist the ADB Wi-Fi host/port when it changes."""
+        if host == self._config.adb_wifi_host and port == self._config.adb_wifi_port:
+            return
+        self._config = PhoneLinkConfig(
+            phone_mac=self._config.phone_mac,
+            phone_name=self._config.phone_name,
+            adb_wifi_host=host,
+            adb_wifi_port=port,
+        )
+        save_config(self._config)
+
+    def _on_wifi_connect(self, _):
+        host = self._wifi_host()
+        if not host:
+            show_dialog(self, "ADB Wi-Fi non configuré",
+                        "Renseignez l'adresse IP du téléphone.\n\n"
+                        "Activez d'abord TCP/IP via USB, puis saisissez l'IP "
+                        "affichée dans les paramètres Wi-Fi du téléphone.",
+                        error=True)
+            return
+        port = self._config.adb_wifi_port
+
+        def worker():
+            ok, msg = adb_core.connect_wifi(host, port)
+            if ok:
+                self._save_wifi_config(host, port)
+
+            def on_done():
+                show_dialog(self, "ADB Wi-Fi", msg, error=not ok)
+                self._refresh_status()
+
+            GLib.idle_add(on_done)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_wifi_disconnect(self, _):
+        host = self._wifi_host() or None
+        port = self._config.adb_wifi_port
+
+        def worker():
+            ok, msg = adb_core.disconnect_wifi(host, port)
+
+            def on_done():
+                show_dialog(self, "ADB Wi-Fi", msg, error=not ok)
+                self._refresh_status()
+
+            GLib.idle_add(on_done)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_wifi_enable_tcpip(self, _):
+        if not adb_core.is_device_connected():
+            show_dialog(self, "ADB USB requis",
+                        "Aucun appareil ADB en USB détecté.\n\n"
+                        "Branchez le téléphone en USB avec le débogage activé, "
+                        "puis réessayez.", error=True)
+            return
+        port = self._config.adb_wifi_port
+
+        def worker():
+            ok, msg = adb_core.enable_tcpip(port)
+            ip = adb_core.get_device_ip() if ok else None
+
+            def on_done():
+                body = msg
+                if ip:
+                    body += f"\n\nIP détectée du téléphone : {ip}"
+                    if self._wifi_host_entry is not None:
+                        self._wifi_host_entry.set_text(ip)
+                show_dialog(self, "ADB TCP/IP", body, error=not ok)
+
+            GLib.idle_add(on_done)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _on_diagnostic(self, _):
         def worker():
@@ -389,13 +566,45 @@ class MainWindow(_Base):
 # Module-level helpers
 # ──────────────────────────────────────────────
 
-def _find_phone(devices: list) -> Optional[object]:
-    """Identify the S21 FE among paired devices by name keywords."""
-    keywords = ("s21", "mickael", "samsung", "galaxy")
-    for dev in devices:
-        if any(kw in dev.name.lower() for kw in keywords):
+_PHONE_KEYWORDS = (
+    "s21", "mickael", "samsung", "galaxy", "pixel", "oneplus", "xiaomi",
+    "redmi", "poco", "huawei", "honor", "oppo", "realme", "vivo", "nokia",
+    "motorola", "moto", "sony", "xperia", "android", "phone",
+)
+
+
+def _find_phone(devices: list, config: PhoneLinkConfig) -> Optional[object]:
+    """Identify the user's phone, ignoring non-phone peripherals (e.g. game controllers).
+
+    Returns None rather than guessing when no phone-like device is present, so a
+    stray peripheral never gets selected or persisted as the phone.
+    """
+    # Drop obvious non-phones (controllers, mice, headsets, …) up front.
+    candidates = [d for d in devices if not getattr(d, "is_excluded", False)]
+
+    # 1. The MAC the user has been using before — but only if it still looks like
+    #    a real device (this also self-heals a config that wrongly captured a
+    #    peripheral such as an Xbox controller).
+    if config.phone_mac:
+        for dev in candidates:
+            if dev.mac.upper() == config.phone_mac.upper():
+                return dev
+
+    # 2. A device that positively identifies as a phone (bluetoothctl Icon: phone),
+    #    preferring one that is currently connected.
+    phones = [d for d in candidates if getattr(d, "is_phone", False)]
+    for dev in phones:
+        if dev.connected:
             return dev
-    return devices[0] if devices else None
+    if phones:
+        return phones[0]
+
+    # 3. Fallback when the icon is unavailable: match a known phone name keyword.
+    for dev in candidates:
+        if any(kw in dev.name.lower() for kw in _PHONE_KEYWORDS):
+            return dev
+
+    return None
 
 
 def _fmt_profile(raw: Optional[str]) -> str:

@@ -11,8 +11,11 @@
 - [x] Ouverture pavucontrol et paramètres GNOME Bluetooth
 - [x] Guide mode appel (5 étapes)
 - [x] Lancement scrcpy avec vérification ADB préalable
-- [x] Import photos via adb pull
+- [x] Import photos via adb pull (USB ou ADB Wi-Fi)
 - [x] Ouverture du dossier photos local
+- [x] Galerie photo intégrée (miniatures des photos importées localement)
+- [x] Accès sans câble via ADB over Wi-Fi (tcpip / connect / disconnect)
+- [x] Config persistante JSON (MAC téléphone + hôte/port ADB Wi-Fi)
 - [x] Diagnostic système (tous les outils)
 - [x] Logging structuré (~/.local/share/phonelink-ubuntu/phonelink.log)
 - [x] Fallback GTK4 pur si libadwaita absent
@@ -22,7 +25,7 @@
 - [ ] Adw.Toast notifications (remplacer les dialogs d'info simples)
 - [ ] Spinner/indicateur pendant les opérations longues (connexion, import)
 - [ ] Auto-refresh toutes les 30 secondes
-- [ ] Mémorisation de la MAC du téléphone configuré (fichier JSON)
+- [x] Mémorisation de la MAC du téléphone configuré (fichier JSON)
 - [ ] Changement de profil audio BT directement depuis l'UI (pactl set-card-profile)
 - [ ] Affichage du niveau de batterie du téléphone (adb shell dumpsys battery)
 - [ ] Icône de statut dans l'en-tête (vert/rouge selon connexion BT)
