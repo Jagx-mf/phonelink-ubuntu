@@ -2,6 +2,46 @@
 
 Date d'analyse : 2026-05-31
 
+## Mise à jour terrain — 2026-06-04 — V0.6 SMS/MMS/RCS-like
+
+Validation terrain réussie sur la branche `feat/v0.6-rcs-notifications`.
+PhoneLink Ubuntu V0.6 affiche maintenant l'historique récent de la conversation
+Cathy au-delà du 28/05, comme KDE Connect.
+
+Cause racine résolue :
+
+- PhoneLink lisait seulement `Telephony.Sms` / `content://sms`.
+- KDE Connect lit aussi les providers SMS/MMS combinés (`content://mms-sms`,
+  `Telephony.Mms`) et les parts MMS.
+- Pour Cathy, `content://sms` s'arrêtait au 28/05, mais
+  `content://mms-sms/conversations` voyait le `thread_id=4` au 04/06.
+- La ligne récente avait un corps nul dans le résumé provider ; le texte était
+  disponible dans `content://mms/part` via `mid = _id`.
+- La lecture des parts MMS `text/plain` / `text/*`, avec fallback `_data` via
+  `ContentResolver.openInputStream()`, donne la parité KDE Connect sur ce fil.
+
+État validé :
+
+- SMS classiques : OK.
+- MMS/RCS-like visibles via provider `mms-sms` / `mms` : OK.
+- Parts MMS texte : OK.
+- Affichage GTK : OK, validé visuellement.
+- `/v1/conversations` : optimisé en lazy loading, ne lit plus les parts MMS.
+- `/v1/messages?conversation_id=<thread_id>` : charge les détails au clic, avec
+  SMS + MMS + parts MMS, tri ancien -> récent.
+- Cache GTK par `conversation_id` : réaffichage instantané au retour sur un fil ;
+  le bouton Rafraîchir force le rechargement.
+- Endpoints debug conservés : `/v1/debug/mms-parts`,
+  `/v1/debug/notifications`, `/v1/debug/sms-provider`.
+
+Limites restantes :
+
+- RemoteInput / envoi RCS non implémenté en V0.6.0.
+- L'envoi SMS existant ne doit pas être modifié dans ce chantier.
+- Les notifications Google Messages restent une source complémentaire, pas une
+  base d'historique RCS complète.
+- Ne pas merger automatiquement dans `main`.
+
 ## Synthèse
 
 PhoneLink Ubuntu est une application desktop Python/GTK4 destinée à piloter un téléphone Android depuis Ubuntu/GNOME. Le projet est en V0.1, avec une architecture simple et lisible : une fenêtre principale GTK/libadwaita, des modules `core` spécialisés par domaine, et un wrapper central pour les appels système.
