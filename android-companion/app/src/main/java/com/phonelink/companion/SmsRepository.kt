@@ -1,6 +1,7 @@
 package com.phonelink.companion
 
 import android.Manifest
+import android.content.ContentUris
 import android.content.Context
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -27,6 +28,8 @@ import org.json.JSONObject
  */
 object SmsRepository {
 
+    private val MMS_PART_URI: Uri = Uri.parse("content://mms/part")
+
     // ---- permissions -----------------------------------------------------
 
     fun hasReadSms(context: Context): Boolean =
@@ -47,68 +50,56 @@ object SmsRepository {
 
     // ---- lecture ---------------------------------------------------------
 
+    private data class ProviderMessage(
+        val threadId: Long,
+        val address: String,
+        val body: String,
+        val timestamp: Long,
+        val outgoing: Boolean,
+        val unreadIncoming: Boolean,
+    )
+
     /**
-     * Conversations, plus récente d'abord. On parcourt les SMS triés par date
-     * décroissante (limités à [scanLimit]) et on retient la première occurrence
-     * de chaque `thread_id` comme résumé de conversation, en comptant au passage
-     * les messages non lus reçus.
+     * Conversations, plus récente d'abord.
+     *
+     * V0.6 RC : on fusionne SMS (`content://sms`) et MMS (`content://mms` +
+     * `content://mms/part`) pour atteindre la même surface que KDE Connect.
      *
      * Renvoie `{ "conversations": [ {id, contact_name, phone_number,
      * last_message, last_timestamp, unread}, … ] }`.
      */
     fun conversations(context: Context, scanLimit: Int = 1000): JSONObject {
-        val resolver = context.contentResolver
-        val projection = arrayOf(
-            Telephony.Sms.THREAD_ID,
-            Telephony.Sms.ADDRESS,
-            Telephony.Sms.BODY,
-            Telephony.Sms.DATE,
-            Telephony.Sms.READ,
-            Telephony.Sms.TYPE,
-        )
-
-        // Résumé par thread (premier vu = le plus récent grâce au tri DESC).
         data class Summary(
-            val address: String,
-            val lastBody: String,
-            val lastTs: Long,
+            var address: String,
+            var lastBody: String,
+            var lastTs: Long,
             var unread: Int,
         )
 
         val byThread = LinkedHashMap<Long, Summary>()
         val contactCache = HashMap<String, String>()
+        val messages = readRecentSmsMessages(context, null, scanLimit) +
+            readRecentMmsMessages(context, null, scanLimit)
 
-        resolver.query(
-            Telephony.Sms.CONTENT_URI,
-            projection,
-            null,
-            null,
-            "${Telephony.Sms.DATE} DESC",
-        )?.use { c ->
-            val idxThread = c.getColumnIndexOrThrow(Telephony.Sms.THREAD_ID)
-            val idxAddr = c.getColumnIndexOrThrow(Telephony.Sms.ADDRESS)
-            val idxBody = c.getColumnIndexOrThrow(Telephony.Sms.BODY)
-            val idxDate = c.getColumnIndexOrThrow(Telephony.Sms.DATE)
-            val idxRead = c.getColumnIndexOrThrow(Telephony.Sms.READ)
-            val idxType = c.getColumnIndexOrThrow(Telephony.Sms.TYPE)
-
-            var scanned = 0
-            while (c.moveToNext() && scanned < scanLimit) {
-                scanned++
-                val threadId = c.getLong(idxThread)
-                val address = c.getString(idxAddr).orEmpty()
-                val body = c.getString(idxBody).orEmpty()
-                val date = c.getLong(idxDate)
-                val read = c.getInt(idxRead)
-                val type = c.getInt(idxType)
-
-                val existing = byThread[threadId]
-                if (existing == null) {
-                    byThread[threadId] = Summary(address, body, date, 0)
+        for (message in messages.sortedByDescending { it.timestamp }) {
+            val existing = byThread[message.threadId]
+            if (existing == null) {
+                byThread[message.threadId] = Summary(
+                    address = message.address,
+                    lastBody = message.body,
+                    lastTs = message.timestamp,
+                    unread = if (message.unreadIncoming) 1 else 0,
+                )
+            } else {
+                if (message.timestamp > existing.lastTs) {
+                    existing.lastBody = message.body
+                    existing.lastTs = message.timestamp
                 }
-                // Non lu = message reçu (INBOX) non marqué lu.
-                if (read == 0 && type == Telephony.Sms.MESSAGE_TYPE_INBOX) {
-                    byThread[threadId]?.let { it.unread += 1 }
+                if (existing.address.isBlank() && message.address.isNotBlank()) {
+                    existing.address = message.address
+                }
+                if (message.unreadIncoming) {
+                    existing.unread += 1
                 }
             }
         }
@@ -148,43 +139,294 @@ object SmsRepository {
         conversationId: String,
         limit: Int = DEFAULT_MESSAGE_LIMIT,
     ): JSONObject {
-        val resolver = context.contentResolver
-        val projection = arrayOf(
-            Telephony.Sms.BODY,
-            Telephony.Sms.DATE,
-            Telephony.Sms.TYPE,
-        )
         val safeLimit = limit.coerceIn(1, 2000)
-
-        // Les N plus récents (DESC + LIMIT), puis on inverse vers ASC.
-        val recent = ArrayList<JSONObject>(safeLimit)
-        resolver.query(
-            Telephony.Sms.CONTENT_URI,
-            projection,
-            "${Telephony.Sms.THREAD_ID} = ?",
-            arrayOf(conversationId),
-            "${Telephony.Sms.DATE} DESC LIMIT $safeLimit",
-        )?.use { c ->
-            val idxBody = c.getColumnIndexOrThrow(Telephony.Sms.BODY)
-            val idxDate = c.getColumnIndexOrThrow(Telephony.Sms.DATE)
-            val idxType = c.getColumnIndexOrThrow(Telephony.Sms.TYPE)
-            while (c.moveToNext()) {
-                recent.add(
-                    JSONObject()
-                        .put("body", c.getString(idxBody).orEmpty())
-                        .put("timestamp", c.getLong(idxDate))
-                        .put("outgoing", isOutgoing(c.getInt(idxType)))
-                )
-            }
+        val threadId = conversationId.toLongOrNull()
+        val recent = if (threadId == null) {
+            emptyList()
+        } else {
+            (readRecentSmsMessages(context, threadId, safeLimit) +
+                readRecentMmsMessages(context, threadId, safeLimit))
+                .sortedByDescending { it.timestamp }
+                .take(safeLimit)
         }
 
         val array = JSONArray()
-        for (i in recent.indices.reversed()) {
-            array.put(recent[i])
+        for (message in recent.asReversed()) {
+            array.put(
+                JSONObject()
+                    .put("body", message.body)
+                    .put("timestamp", message.timestamp)
+                    .put("outgoing", message.outgoing)
+            )
         }
         return JSONObject()
             .put("conversation_id", conversationId)
             .put("messages", array)
+    }
+
+    private fun readRecentSmsMessages(
+        context: Context,
+        threadId: Long?,
+        limit: Int,
+    ): List<ProviderMessage> {
+        val resolver = context.contentResolver
+        val projection = arrayOf(
+            Telephony.Sms.THREAD_ID,
+            Telephony.Sms.ADDRESS,
+            Telephony.Sms.BODY,
+            Telephony.Sms.DATE,
+            Telephony.Sms.READ,
+            Telephony.Sms.TYPE,
+        )
+        val selection = threadId?.let { "${Telephony.Sms.THREAD_ID} = ?" }
+        val selectionArgs = threadId?.let { arrayOf(it.toString()) }
+        val messages = ArrayList<ProviderMessage>(limit)
+        try {
+            resolver.query(
+                Telephony.Sms.CONTENT_URI,
+                projection,
+                selection,
+                selectionArgs,
+                "${Telephony.Sms.DATE} DESC LIMIT $limit",
+            )?.use { c ->
+                val idxThread = c.getColumnIndexOrThrow(Telephony.Sms.THREAD_ID)
+                val idxAddr = c.getColumnIndexOrThrow(Telephony.Sms.ADDRESS)
+                val idxBody = c.getColumnIndexOrThrow(Telephony.Sms.BODY)
+                val idxDate = c.getColumnIndexOrThrow(Telephony.Sms.DATE)
+                val idxRead = c.getColumnIndexOrThrow(Telephony.Sms.READ)
+                val idxType = c.getColumnIndexOrThrow(Telephony.Sms.TYPE)
+                while (c.moveToNext() && messages.size < limit) {
+                    val type = c.getInt(idxType)
+                    val read = c.getInt(idxRead)
+                    messages.add(
+                        ProviderMessage(
+                            threadId = c.getLong(idxThread),
+                            address = c.getString(idxAddr).orEmpty(),
+                            body = c.getString(idxBody).orEmpty(),
+                            timestamp = c.getLong(idxDate),
+                            outgoing = isOutgoing(type),
+                            unreadIncoming = read == 0 && type == Telephony.Sms.MESSAGE_TYPE_INBOX,
+                        )
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            // Une erreur de lecture SMS ne doit pas faire échouer le serveur.
+        }
+        return messages
+    }
+
+    private fun readRecentMmsMessages(
+        context: Context,
+        threadId: Long?,
+        limit: Int,
+    ): List<ProviderMessage> {
+        val projection = arrayOf(
+            Telephony.Mms._ID,
+            Telephony.Mms.THREAD_ID,
+            Telephony.Mms.DATE,
+            Telephony.Mms.READ,
+            Telephony.Mms.MESSAGE_BOX,
+        )
+        val selection = threadId?.let { "${Telephony.Mms.THREAD_ID} = ?" }
+        val selectionArgs = threadId?.let { arrayOf(it.toString()) }
+        val messages = ArrayList<ProviderMessage>(limit)
+        try {
+            queryWithSortFallback(
+                context,
+                Telephony.Mms.CONTENT_URI,
+                projection,
+                selection,
+                selectionArgs,
+                Telephony.Mms.DATE,
+                limit,
+            )?.use { c ->
+                val idxId = c.getColumnIndexOrThrow(Telephony.Mms._ID)
+                val idxThread = c.getColumnIndexOrThrow(Telephony.Mms.THREAD_ID)
+                val idxDate = c.getColumnIndexOrThrow(Telephony.Mms.DATE)
+                val idxRead = c.getColumnIndexOrThrow(Telephony.Mms.READ)
+                val idxBox = c.getColumnIndexOrThrow(Telephony.Mms.MESSAGE_BOX)
+                while (c.moveToNext() && messages.size < limit) {
+                    val id = c.getLong(idxId)
+                    val messageBox = c.getInt(idxBox)
+                    val body = readMmsText(context, id)
+                    messages.add(
+                        ProviderMessage(
+                            threadId = c.getLong(idxThread),
+                            address = readMmsAddress(context, id, messageBox),
+                            body = body,
+                            timestamp = normalizeProviderTimestamp(c.getLong(idxDate)),
+                            outgoing = isMmsOutgoing(messageBox),
+                            unreadIncoming = c.getInt(idxRead) == 0 &&
+                                messageBox == Telephony.Mms.MESSAGE_BOX_INBOX,
+                        )
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            // Certains ROMs exposent partiellement content://mms ; on garde les SMS.
+        }
+        return messages
+    }
+
+    private fun queryWithSortFallback(
+        context: Context,
+        uri: Uri,
+        projection: Array<String>,
+        selection: String?,
+        selectionArgs: Array<String>?,
+        dateColumn: String,
+        limit: Int,
+    ): android.database.Cursor? {
+        return try {
+            context.contentResolver.query(
+                uri,
+                projection,
+                selection,
+                selectionArgs,
+                "$dateColumn DESC LIMIT $limit",
+            )
+        } catch (e: Exception) {
+            context.contentResolver.query(
+                uri,
+                projection,
+                selection,
+                selectionArgs,
+                "$dateColumn DESC",
+            )
+        }
+    }
+
+    private fun readMmsText(context: Context, mid: Long): String {
+        val parts = readMmsTextParts(context, mid)
+        return parts.joinToString("\n").trim()
+    }
+
+    private fun readMmsTextParts(context: Context, mid: Long): List<String> {
+        val projection = arrayOf(
+            Telephony.Mms.Part._ID,
+            Telephony.Mms.Part._DATA,
+            Telephony.Mms.Part.CONTENT_TYPE,
+            Telephony.Mms.Part.TEXT,
+        )
+        val parts = ArrayList<String>()
+        try {
+            context.contentResolver.query(
+                MMS_PART_URI,
+                projection,
+                "${Telephony.Mms.Part.MSG_ID} = ?",
+                arrayOf(mid.toString()),
+                null,
+            )?.use { c ->
+                val idxId = c.getColumnIndexOrThrow(Telephony.Mms.Part._ID)
+                val idxData = c.getColumnIndexOrThrow(Telephony.Mms.Part._DATA)
+                val idxType = c.getColumnIndexOrThrow(Telephony.Mms.Part.CONTENT_TYPE)
+                val idxText = c.getColumnIndexOrThrow(Telephony.Mms.Part.TEXT)
+                while (c.moveToNext()) {
+                    val contentType = c.getString(idxType).orEmpty()
+                    if (!isTextContentType(contentType)) continue
+                    val text = if (!c.isNull(idxData)) {
+                        readMmsPartData(context, c.getLong(idxId))
+                    } else {
+                        c.getString(idxText).orEmpty()
+                    }
+                    if (text.isNotBlank()) parts.add(text)
+                }
+            }
+        } catch (e: Exception) {
+            // Une part illisible ne doit pas bloquer le reste du fil.
+        }
+        return parts
+    }
+
+    private fun readMmsPartData(context: Context, partId: Long): String {
+        val uri = ContentUris.withAppendedId(MMS_PART_URI, partId)
+        return try {
+            context.contentResolver.openInputStream(uri)?.use { stream ->
+                stream.readBytes().toString(Charsets.UTF_8)
+            }.orEmpty()
+        } catch (e: Exception) {
+            ""
+        }
+    }
+
+    private fun readMmsAddress(context: Context, mid: Long, messageBox: Int): String {
+        val uri = Uri.parse("content://mms/$mid/addr")
+        var fallback = ""
+        var preferred = ""
+        try {
+            context.contentResolver.query(
+                uri,
+                arrayOf("address", "type"),
+                null,
+                null,
+                null,
+            )?.use { c ->
+                val idxAddress = c.getColumnIndex("address")
+                val idxType = c.getColumnIndex("type")
+                while (c.moveToNext()) {
+                    val address = if (idxAddress >= 0) c.getString(idxAddress).orEmpty() else ""
+                    if (address.isBlank() || address == "insert-address-token") continue
+                    val type = if (idxType >= 0) c.getInt(idxType) else 0
+                    if (isIncomingMms(messageBox) && type == 137) return address // FROM
+                    if (isMmsOutgoing(messageBox) && (type == 151 || type == 130)) {
+                        preferred = address // TO / CC
+                    }
+                    if (fallback.isBlank()) fallback = address
+                }
+            }
+        } catch (e: Exception) {
+            return fallback
+        }
+        return preferred.ifBlank { fallback }
+    }
+
+    fun debugMmsParts(context: Context, mid: Long): JSONObject {
+        val parts = JSONArray()
+        val root = JSONObject()
+            .put("status", "ok")
+            .put("mid", mid)
+            .put("uri", MMS_PART_URI.toString())
+            .put("parts", parts)
+        try {
+            context.contentResolver.query(
+                MMS_PART_URI,
+                null,
+                "${Telephony.Mms.Part.MSG_ID} = ?",
+                arrayOf(mid.toString()),
+                null,
+            )?.use { c ->
+                root.put("columns", JSONArray(c.columnNames.toList()))
+                while (c.moveToNext()) {
+                    parts.put(debugMmsPartRow(context, c))
+                }
+            } ?: root.put("status", "null_cursor")
+        } catch (e: Exception) {
+            root
+                .put("status", "error")
+                .put("error", e.javaClass.simpleName)
+                .put("message", e.message ?: "")
+        }
+        return root.put("part_count", parts.length())
+    }
+
+    private fun debugMmsPartRow(context: Context, c: android.database.Cursor): JSONObject {
+        val row = JSONObject()
+        for (i in 0 until c.columnCount) {
+            row.put(c.getColumnName(i), cursorValue(c, i))
+        }
+        val id = c.getColumnIndex(Telephony.Mms.Part._ID)
+            .takeIf { it >= 0 && !c.isNull(it) }
+            ?.let { c.getLong(it) }
+        val contentType = c.getColumnIndex(Telephony.Mms.Part.CONTENT_TYPE)
+            .takeIf { it >= 0 && !c.isNull(it) }
+            ?.let { c.getString(it) }
+            .orEmpty()
+        row.put("is_text_part", isTextContentType(contentType))
+        if (id != null && isTextContentType(contentType)) {
+            row.put("resolved_text", readMmsPartResolvedText(context, c, id))
+        }
+        return row
     }
 
     /** True pour les types « sortants » (envoyé / outbox / échec / file). */
@@ -194,6 +436,48 @@ object SmsRepository {
         Telephony.Sms.MESSAGE_TYPE_FAILED,
         Telephony.Sms.MESSAGE_TYPE_QUEUED -> true
         else -> false
+    }
+
+    private fun isMmsOutgoing(messageBox: Int): Boolean = when (messageBox) {
+        Telephony.Mms.MESSAGE_BOX_SENT,
+        Telephony.Mms.MESSAGE_BOX_OUTBOX,
+        Telephony.Mms.MESSAGE_BOX_FAILED -> true
+        else -> false
+    }
+
+    private fun isIncomingMms(messageBox: Int): Boolean =
+        messageBox == Telephony.Mms.MESSAGE_BOX_INBOX
+
+    private fun normalizeProviderTimestamp(raw: Long): Long =
+        if (raw in 1L..9_999_999_999L) raw * 1000L else raw
+
+    private fun isTextContentType(contentType: String): Boolean =
+        contentType.lowercase().startsWith("text/")
+
+    private fun readMmsPartResolvedText(
+        context: Context,
+        c: android.database.Cursor,
+        partId: Long,
+    ): String {
+        val idxData = c.getColumnIndex(Telephony.Mms.Part._DATA)
+        val idxText = c.getColumnIndex(Telephony.Mms.Part.TEXT)
+        return if (idxData >= 0 && !c.isNull(idxData)) {
+            readMmsPartData(context, partId)
+        } else if (idxText >= 0 && !c.isNull(idxText)) {
+            c.getString(idxText).orEmpty()
+        } else {
+            ""
+        }
+    }
+
+    private fun cursorValue(c: android.database.Cursor, index: Int): Any {
+        if (c.isNull(index)) return JSONObject.NULL
+        return when (c.getType(index)) {
+            android.database.Cursor.FIELD_TYPE_INTEGER -> c.getLong(index)
+            android.database.Cursor.FIELD_TYPE_FLOAT -> c.getDouble(index)
+            android.database.Cursor.FIELD_TYPE_BLOB -> "<blob ${c.getBlob(index)?.size ?: 0} bytes>"
+            else -> c.getString(index) ?: JSONObject.NULL
+        }
     }
 
     // ---- envoi -----------------------------------------------------------

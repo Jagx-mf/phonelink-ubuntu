@@ -17,6 +17,7 @@ import org.json.JSONObject
  *  - `GET  /rcs/messages`  token requis (RCS captés via notifications)
  *  - `GET  /debug/notifications` token requis (diagnostic notifications)
  *  - `GET  /debug/sms-provider` token requis (diagnostic providers SMS/MMS)
+ *  - `GET  /debug/mms-parts` token requis (diagnostic parts MMS)
  *
  * V0.5 — SMS réels : si les permissions SMS sont accordées, les endpoints
  * lisent/écrivent les vrais SMS via [SmsRepository]. Sinon ils retombent sur
@@ -64,6 +65,8 @@ class CompanionServer(
                 guarded(session) { debugNotifications() }
             method == Method.GET && uri == "/v1/debug/sms-provider" ->
                 guarded(session) { debugSmsProvider(session) }
+            method == Method.GET && uri == "/v1/debug/mms-parts" ->
+                guarded(session) { debugMmsParts(session) }
             else -> jsonError(Response.Status.NOT_FOUND, "not_found")
         }
     }
@@ -190,6 +193,14 @@ class CompanionServer(
         val address = session.parameters["address"]?.firstOrNull()
         val body = SmsProviderDebug.dump(context, address)
         return json(Response.Status.OK, body)
+    }
+
+    private fun debugMmsParts(session: IHTTPSession): Response {
+        val mid = session.parameters["mid"]?.firstOrNull()?.toLongOrNull()
+        if (mid == null) {
+            return jsonError(Response.Status.BAD_REQUEST, "invalid_mid")
+        }
+        return json(Response.Status.OK, SmsRepository.debugMmsParts(context, mid))
     }
 
     /** Numéro associé à un thread, lu depuis le résumé des conversations. */

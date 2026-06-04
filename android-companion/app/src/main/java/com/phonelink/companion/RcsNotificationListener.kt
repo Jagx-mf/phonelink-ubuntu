@@ -339,16 +339,10 @@ class RcsNotificationListener : NotificationListenerService() {
 
     private fun extraMessageBundles(extras: Bundle?): List<Bundle> {
         extras ?: return emptyList()
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            extras.getParcelableArray(Notification.EXTRA_MESSAGES, Bundle::class.java)
-                ?.toList()
-                .orEmpty()
-        } else {
-            @Suppress("DEPRECATION")
-            extras.getParcelableArray(Notification.EXTRA_MESSAGES)
-                ?.mapNotNull { it as? Bundle }
-                .orEmpty()
-        }
+        @Suppress("DEPRECATION")
+        return extras.getParcelableArray(Notification.EXTRA_MESSAGES)
+            ?.mapNotNull { it as? Bundle }
+            .orEmpty()
     }
 
     private fun firstNonBlank(vararg values: String?): String =
