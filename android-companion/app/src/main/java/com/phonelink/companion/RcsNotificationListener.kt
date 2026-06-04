@@ -29,6 +29,15 @@ import org.json.JSONObject
  */
 class RcsNotificationListener : NotificationListenerService() {
 
+    private data class CaptureResult(
+        val added: Int = 0,
+        val extracted: Int = 0,
+        val conversationKey: String = "",
+        val contactName: String = "",
+        val timestamps: List<Long> = emptyList(),
+        val source: String = "",
+    )
+
     override fun onCreate() {
         super.onCreate()
         RcsMessageStore.attach(applicationContext)
@@ -52,8 +61,8 @@ class RcsNotificationListener : NotificationListenerService() {
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
         if (sbn.packageName != TARGET_PACKAGE) return
-        val added = handle(sbn, log = true)
-        Log.d(TAG, "onNotificationPosted key=${sbn.key} → +$added message(s)")
+        val result = handle(sbn, log = true)
+        Log.d(TAG, "onNotificationPosted key=${sbn.key} → +${result.added} message(s)")
     }
 
     /**
@@ -69,34 +78,53 @@ class RcsNotificationListener : NotificationListenerService() {
         } ?: return 0
         var processed = 0
         var added = 0
+        var extracted = 0
+        val details = ArrayList<CaptureResult>()
         for (sbn in actives) {
             if (sbn.packageName != TARGET_PACKAGE) continue
             processed++
-            added += handle(sbn, log = false)
+            val result = handle(sbn, log = false)
+            added += result.added
+            extracted += result.extracted
+            details.add(result)
         }
-        Log.i(TAG, "refreshFromActive — $processed notif Messages, +$added message(s), total cache=${RcsMessageStore.totalMessages()}")
+        Log.i(
+            TAG,
+            "refreshFromActive — $processed notif Messages, " +
+                "$extracted message(s) extraits, +$added message(s), " +
+                "total cache=${RcsMessageStore.totalMessages()}",
+        )
+        details.forEach { result ->
+            Log.i(
+                TAG,
+                "refreshFromActive detail — source=${result.source} " +
+                    "conversation=${result.conversationKey.q()} " +
+                    "contact=${result.contactName.q()} extracted=${result.extracted} " +
+                    "added=${result.added} timestamps=${result.timestamps}",
+            )
+        }
         return processed
     }
 
     // ---- extraction -------------------------------------------------------
 
-    /** Traite une notification : ajoute ses messages au store. Renvoie le nombre ajouté. */
-    private fun handle(sbn: StatusBarNotification, log: Boolean): Int {
+    /** Traite une notification : ajoute ses messages au store et renvoie le diagnostic. */
+    private fun handle(sbn: StatusBarNotification, log: Boolean): CaptureResult {
         return try {
             capture(sbn, log)
         } catch (e: Exception) {
             Log.w(TAG, "capture échouée key=${sbn.key}: ${e.message}")
-            0
+            CaptureResult()
         }
     }
 
-    private fun capture(sbn: StatusBarNotification, log: Boolean): Int {
-        val n = sbn.notification ?: return 0
+    private fun capture(sbn: StatusBarNotification, log: Boolean): CaptureResult {
+        val n = sbn.notification ?: return CaptureResult()
         val extras = n.extras
         val title = extras?.getCharSequence(NotificationCompat.EXTRA_TITLE)?.toString().orEmpty()
         val text = extras?.getCharSequence(NotificationCompat.EXTRA_TEXT)?.toString().orEmpty()
         val bigText = extras?.getCharSequence(NotificationCompat.EXTRA_BIG_TEXT)?.toString().orEmpty()
-        val style = NotificationCompat.MessagingStyle.extractMessagingStyleFromNotification(n)
+        val style = messagingStyleOf(n)
         val convoTitle = style?.conversationTitle?.toString()
         val isGroup = style?.isGroupConversation ?: false
         val shortcut = shortcutIdOf(n)
@@ -105,8 +133,13 @@ class RcsNotificationListener : NotificationListenerService() {
         var added = 0
         var extractedCount = 0
         var lastSender = ""
+        var conversationKey = firstNonBlank(shortcut, convoTitle, title, sbn.key)
+        var contactName = firstNonBlank(convoTitle, title)
+        var source = "none"
+        val timestamps = ArrayList<Long>()
 
         if (style != null && style.messages.isNotEmpty()) {
+            source = "MessagingStyle"
             for (message in style.messages) {
                 extractedCount++
                 val sender = message.person?.name?.toString().orEmpty()
@@ -114,20 +147,33 @@ class RcsNotificationListener : NotificationListenerService() {
                 val outgoing = message.person == null
                 val key = firstNonBlank(shortcut, convoTitle, sender, title, sbn.key)
                 val contact = firstNonBlank(convoTitle, sender, title)
+                conversationKey = key
+                contactName = contact
+                timestamps.add(message.timestamp)
                 if (RcsMessageStore.add(key, contact, message.text?.toString().orEmpty(),
                         message.timestamp, outgoing, sender)) added++
             }
         } else {
             // Fallback 1 : tableau brut EXTRA_MESSAGES (si l'extraction a échoué).
             val rawAdded = captureFromExtraMessages(sbn, extras, shortcut, convoTitle, title)
-            extractedCount = rawAdded.second
-            added += rawAdded.first
+            extractedCount = rawAdded.seen
+            added += rawAdded.added
+            if (rawAdded.seen > 0) {
+                source = "EXTRA_MESSAGES"
+                conversationKey = rawAdded.conversationKey
+                contactName = rawAdded.contactName
+                timestamps.addAll(rawAdded.timestamps)
+            }
             // Fallback 2 : notification texte simple.
             if (extractedCount == 0 && title.isNotBlank()) {
                 val body = bigText.ifBlank { text }
                 if (body.isNotBlank() &&
                     RcsMessageStore.add(firstNonBlank(shortcut, title), title, body,
                         sbn.postTime, false, title)) {
+                    source = "text"
+                    conversationKey = firstNonBlank(shortcut, title)
+                    contactName = title
+                    timestamps.add(sbn.postTime)
                     added++; extractedCount = 1
                 }
             }
@@ -142,25 +188,51 @@ class RcsNotificationListener : NotificationListenerService() {
                 append(" msgStyle=$extractedCount lastSender=${lastSender.q()} postTime=${sbn.postTime}")
             })
         }
-        return added
+        return CaptureResult(
+            added = added,
+            extracted = extractedCount,
+            conversationKey = conversationKey,
+            contactName = contactName,
+            timestamps = timestamps,
+            source = source,
+        )
     }
 
     /**
      * Parse manuellement `Notification.EXTRA_MESSAGES` (tableau de Bundle :
      * "text"/"time"/"sender"). Utile si MessagingStyle n'a pas pu être extrait.
-     * Renvoie (ajoutés, vus).
+     * Renvoie les messages ajoutés/vus et leurs métadonnées.
      */
+    private data class ExtraCaptureResult(
+        val added: Int,
+        val seen: Int,
+        val conversationKey: String,
+        val contactName: String,
+        val timestamps: List<Long>,
+    )
+
     private fun captureFromExtraMessages(
         sbn: StatusBarNotification,
         extras: Bundle?,
         shortcut: String,
         convoTitle: String?,
         title: String,
-    ): Pair<Int, Int> {
+    ): ExtraCaptureResult {
         val raw = extraMessageBundles(extras)
-        if (raw.isEmpty()) return 0 to 0
+        if (raw.isEmpty()) {
+            return ExtraCaptureResult(
+                added = 0,
+                seen = 0,
+                conversationKey = firstNonBlank(shortcut, convoTitle, title),
+                contactName = firstNonBlank(convoTitle, title),
+                timestamps = emptyList(),
+            )
+        }
         var added = 0
         var seen = 0
+        var conversationKey = firstNonBlank(shortcut, convoTitle, title, sbn.key)
+        var contactName = firstNonBlank(convoTitle, title)
+        val timestamps = ArrayList<Long>()
         for (b in raw) {
             val body = b.getCharSequence("text")?.toString().orEmpty()
             if (body.isBlank()) continue
@@ -170,9 +242,12 @@ class RcsNotificationListener : NotificationListenerService() {
             val outgoing = sender.isBlank()
             val key = firstNonBlank(shortcut, convoTitle, sender, title, sbn.key)
             val contact = firstNonBlank(convoTitle, sender, title)
+            conversationKey = key
+            contactName = contact
+            timestamps.add(time)
             if (RcsMessageStore.add(key, contact, body, time, outgoing, sender)) added++
         }
-        return added to seen
+        return ExtraCaptureResult(added, seen, conversationKey, contactName, timestamps)
     }
 
     // ---- debug ------------------------------------------------------------
@@ -187,52 +262,77 @@ class RcsNotificationListener : NotificationListenerService() {
         } ?: return arr
         for (sbn in actives) {
             if (sbn.packageName != TARGET_PACKAGE) continue
-            val n = sbn.notification ?: continue
-            val extras = n.extras
-            val style = NotificationCompat.MessagingStyle.extractMessagingStyleFromNotification(n)
-            val msgs = JSONArray()
-            style?.messages?.forEach { m ->
-                msgs.put(
+            try {
+                arr.put(debugObjectFor(sbn))
+            } catch (e: Exception) {
+                arr.put(
                     JSONObject()
-                        .put("sender", m.person?.name?.toString() ?: "")
-                        .put("timestamp", m.timestamp)
-                        .put("text", m.text?.toString() ?: "")
-                        .put("outgoing", m.person == null)
+                        .put("key", sbn.key)
+                        .put("package", sbn.packageName)
+                        .put("error", e.javaClass.simpleName)
+                        .put("message", e.message ?: "")
                 )
             }
-            val rawMessages = extraMessageBundles(extras)
-            val rawMsgs = rawMessages.size
-            val extraMsgs = JSONArray()
-            rawMessages.forEach { b ->
-                extraMsgs.put(
-                    JSONObject()
-                        .put("sender", b.getCharSequence("sender")?.toString() ?: "")
-                        .put("timestamp", b.getLong("time", sbn.postTime))
-                        .put("text", b.getCharSequence("text")?.toString() ?: "")
-                )
-            }
-            arr.put(
-                JSONObject()
-                    .put("key", sbn.key)
-                    .put("package", sbn.packageName)
-                    .put("postTime", sbn.postTime)
-                    .put("title", extras?.getCharSequence(NotificationCompat.EXTRA_TITLE)?.toString() ?: "")
-                    .put("text", extras?.getCharSequence(NotificationCompat.EXTRA_TEXT)?.toString() ?: "")
-                    .put("bigText", extras?.getCharSequence(NotificationCompat.EXTRA_BIG_TEXT)?.toString() ?: "")
-                    .put("conversationTitle", style?.conversationTitle?.toString() ?: "")
-                    .put("isGroupConversation", style?.isGroupConversation ?: false)
-                    .put("shortcutId", shortcutIdOf(n))
-                    .put("category", n.category ?: "")
-                    .put("messagingStyleCount", style?.messages?.size ?: 0)
-                    .put("extraMessagesCount", rawMsgs)
-                    .put("messages", msgs)
-                    .put("extraMessages", extraMsgs)
-            )
         }
         return arr
     }
 
     // ---- helpers ----------------------------------------------------------
+
+    private fun debugObjectFor(sbn: StatusBarNotification): JSONObject {
+        val n = sbn.notification
+        if (n == null) {
+            return JSONObject()
+                .put("key", sbn.key)
+                .put("package", sbn.packageName)
+                .put("error", "missing_notification")
+        }
+        val extras = n.extras
+        val style = messagingStyleOf(n)
+        val msgs = JSONArray()
+        style?.messages?.forEach { m ->
+            msgs.put(
+                JSONObject()
+                    .put("sender", m.person?.name?.toString() ?: "")
+                    .put("timestamp", m.timestamp)
+                    .put("text", m.text?.toString() ?: "")
+                    .put("outgoing", m.person == null)
+            )
+        }
+        val rawMessages = extraMessageBundles(extras)
+        val extraMsgs = JSONArray()
+        rawMessages.forEach { b ->
+            extraMsgs.put(
+                JSONObject()
+                    .put("sender", b.getCharSequence("sender")?.toString() ?: "")
+                    .put("timestamp", b.getLong("time", sbn.postTime))
+                    .put("text", b.getCharSequence("text")?.toString() ?: "")
+            )
+        }
+        return JSONObject()
+            .put("key", sbn.key)
+            .put("package", sbn.packageName)
+            .put("postTime", sbn.postTime)
+            .put("title", extras?.getCharSequence(NotificationCompat.EXTRA_TITLE)?.toString() ?: "")
+            .put("text", extras?.getCharSequence(NotificationCompat.EXTRA_TEXT)?.toString() ?: "")
+            .put("bigText", extras?.getCharSequence(NotificationCompat.EXTRA_BIG_TEXT)?.toString() ?: "")
+            .put("conversationTitle", style?.conversationTitle?.toString() ?: "")
+            .put("isGroupConversation", style?.isGroupConversation ?: false)
+            .put("shortcutId", shortcutIdOf(n))
+            .put("category", n.category ?: "")
+            .put("messagingStyleCount", style?.messages?.size ?: 0)
+            .put("extraMessagesCount", rawMessages.size)
+            .put("messages", msgs)
+            .put("extraMessages", extraMsgs)
+    }
+
+    private fun messagingStyleOf(n: Notification): NotificationCompat.MessagingStyle? =
+        try {
+            NotificationCompat.MessagingStyle.extractMessagingStyleFromNotification(n)
+        } catch (e: Exception) {
+            Log.w(TAG, "MessagingStyle extraction échouée: ${e.message}")
+            null
+        }
 
     private fun shortcutIdOf(n: Notification): String =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) n.shortcutId ?: "" else ""

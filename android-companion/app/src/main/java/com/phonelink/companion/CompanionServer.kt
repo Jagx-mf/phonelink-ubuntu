@@ -16,6 +16,7 @@ import org.json.JSONObject
  *  - `POST /send`          token requis (envoi réel via SmsManager)
  *  - `GET  /rcs/messages`  token requis (RCS captés via notifications)
  *  - `GET  /debug/notifications` token requis (diagnostic notifications)
+ *  - `GET  /debug/sms-provider` token requis (diagnostic providers SMS/MMS)
  *
  * V0.5 — SMS réels : si les permissions SMS sont accordées, les endpoints
  * lisent/écrivent les vrais SMS via [SmsRepository]. Sinon ils retombent sur
@@ -61,6 +62,8 @@ class CompanionServer(
                 guarded(session) { rcsMessages() }
             method == Method.GET && uri == "/v1/debug/notifications" ->
                 guarded(session) { debugNotifications() }
+            method == Method.GET && uri == "/v1/debug/sms-provider" ->
+                guarded(session) { debugSmsProvider(session) }
             else -> jsonError(Response.Status.NOT_FOUND, "not_found")
         }
     }
@@ -154,17 +157,38 @@ class CompanionServer(
     }
 
     private fun debugNotifications(): Response {
-        val listener = RcsNotificationListener.instance
-        val body = if (listener != null) {
+        val body = try {
+            val listener = RcsNotificationListener.instance
+            if (listener != null) {
+                val notifications = listener.debugDump()
+                JSONObject()
+                    .put("status", "ok")
+                    .put("target_package", RcsNotificationListener.TARGET_PACKAGE)
+                    .put("notification_count", notifications.length())
+                    .put("notifications", notifications)
+            } else {
+                JSONObject()
+                    .put("status", "listener_not_connected")
+                    .put("error", "notification_listener_not_connected")
+                    .put("target_package", RcsNotificationListener.TARGET_PACKAGE)
+                    .put("notification_count", 0)
+                    .put("notifications", JSONArray())
+            }
+        } catch (e: Exception) {
             JSONObject()
-                .put("status", "ok")
-                .put("notifications", listener.debugDump())
-        } else {
-            JSONObject()
-                .put("status", "listener_not_connected")
-                .put("error", "notification_listener_not_connected")
+                .put("status", "error")
+                .put("error", e.javaClass.simpleName)
+                .put("message", e.message ?: "")
+                .put("target_package", RcsNotificationListener.TARGET_PACKAGE)
+                .put("notification_count", 0)
                 .put("notifications", JSONArray())
         }
+        return json(Response.Status.OK, body)
+    }
+
+    private fun debugSmsProvider(session: IHTTPSession): Response {
+        val address = session.parameters["address"]?.firstOrNull()
+        val body = SmsProviderDebug.dump(context, address)
         return json(Response.Status.OK, body)
     }
 
