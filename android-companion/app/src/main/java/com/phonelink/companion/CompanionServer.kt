@@ -50,6 +50,8 @@ class CompanionServer(
                 guarded(session) { messages(session) }
             method == Method.POST && uri == "/v1/send" ->
                 guarded(session) { send(session) }
+            method == Method.GET && uri == "/v1/rcs/messages" ->
+                guarded(session) { json(Response.Status.OK, RcsMessageStore.snapshot()) }
             else -> jsonError(Response.Status.NOT_FOUND, "not_found")
         }
     }
@@ -66,6 +68,7 @@ class CompanionServer(
             .put("app_version", appVersion)
             .put("sms_permission", smsPermission)
             .put("default_sms_app", SmsRepository.isDefaultSmsApp(context))
+            .put("notification_access", RcsNotificationListener.hasAccess(context))
             .put("device", deviceName)
             // Champs historiques conservés pour rétro-compatibilité de l'app.
             .put("paired", pairing.isPaired)

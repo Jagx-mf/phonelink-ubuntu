@@ -33,5 +33,21 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!--
+          V0.6 — Accès aux notifications pour capter les messages RCS de Google
+          Messages (lecture seule). Lié par le système : requiert la permission
+          BIND_NOTIFICATION_LISTENER_SERVICE et l'autorisation explicite de
+          l'utilisateur (Réglages → Accès aux notifications).
+        -->
+        <service
+            android:name=".RcsNotificationListener"
+            android:label="@string/rcs_listener_label"
+            android:exported="false"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
     </application>
 </manifest>

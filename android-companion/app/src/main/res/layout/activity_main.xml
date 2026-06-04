@@ -114,6 +114,20 @@
             android:layout_height="wrap_content"
             android:text="—" />
 
+        <!-- Accès notifications (RCS) -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="@string/label_rcs_access"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/txtRcs"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="—" />
+
         <!-- Boutons -->
         <Button
             android:id="@+id/btnRequestSms"
@@ -121,6 +135,13 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="24dp"
             android:text="@string/btn_request_sms" />
+
+        <Button
+            android:id="@+id/btnNotifAccess"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/btn_notif_access" />
 
         <Button
             android:id="@+id/btnStart"

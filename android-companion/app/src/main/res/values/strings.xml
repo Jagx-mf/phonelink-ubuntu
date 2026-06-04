@@ -9,6 +9,8 @@
     <string name="label_pin">PIN d\'appairage</string>
     <string name="label_paired">Appairé</string>
     <string name="label_sms_mode">Mode SMS</string>
+    <string name="label_rcs_access">Accès notifications (RCS)</string>
+    <string name="rcs_listener_label">PhoneLink — capture des messages RCS</string>
 
     <string name="status_running">Démarré</string>
     <string name="status_stopped">Arrêté</string>
@@ -23,6 +25,9 @@
     <string name="btn_stop">Arrêter le serveur</string>
     <string name="btn_regenerate_pin">Nouveau PIN</string>
     <string name="btn_request_sms">Autoriser l\'accès aux SMS</string>
+    <string name="btn_notif_access">Activer l\'accès aux notifications (RCS)</string>
+    <string name="rcs_access_on">Accordé — RCS capté via notifications</string>
+    <string name="rcs_access_off">Non accordé — RCS indisponible</string>
 
     <string name="pin_regenerated">Nouveau PIN généré</string>
     <string name="start_error">Erreur au démarrage : %1$s</string>

@@ -40,6 +40,13 @@ _CSS = b"""
 .sms-out { background-color: @accent_bg_color; color: @accent_fg_color; }
 .sms-time { font-size: 0.75em; opacity: 0.6; }
 .sms-preview { opacity: 0.6; font-size: 0.9em; }
+.sms-badge {
+    font-size: 0.7em;
+    padding: 1px 6px;
+    border-radius: 8px;
+    background-color: alpha(@theme_fg_color, 0.12);
+}
+.sms-badge-rcs { background-color: alpha(@accent_bg_color, 0.35); }
 """
 
 
@@ -53,6 +60,7 @@ class SmsWindow(Gtk.Window):
 
         self._backend = sms_core.get_backend()
         self._current_id: str | None = None
+        self._current_source: str = "sms"  # source du fil ouvert (compose RCS off)
         # Cache des messages déjà chargés, par conversation_id → liste de Message.
         # Évite de recharger depuis Android à chaque clic (P3).
         self._cache: dict[str, list[sms_core.Message]] = {}
@@ -178,6 +186,7 @@ class SmsWindow(Gtk.Window):
         row = Gtk.ListBoxRow()
         row._conversation_id = convo.id  # read back on selection
         row._contact_name = convo.contact_name  # used by the send confirmation
+        row._source = convo.source  # "sms" | "rcs" — gère compose + badge
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         box.set_margin_top(8)
@@ -185,10 +194,21 @@ class SmsWindow(Gtk.Window):
         box.set_margin_start(10)
         box.set_margin_end(10)
 
+        # Ligne nom + badge de source (SMS classique / RCS via notification).
+        name_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         name = Gtk.Label(label=convo.contact_name)
         name.set_xalign(0)
+        name.set_hexpand(True)
+        name.set_ellipsize(3)  # END
         name.add_css_class("heading")
-        box.append(name)
+        name_row.append(name)
+        if convo.source == "rcs":
+            badge = Gtk.Label(label="RCS")
+            badge.add_css_class("sms-badge")
+            badge.add_css_class("sms-badge-rcs")
+            badge.set_valign(Gtk.Align.CENTER)
+            name_row.append(badge)
+        box.append(name_row)
 
         last = convo.last_message
         if last is not None:
@@ -271,14 +291,38 @@ class SmsWindow(Gtk.Window):
     def _on_conversation_selected(self, _list: Gtk.ListBox, row: Gtk.ListBoxRow | None) -> None:
         if row is None:
             self._current_id = None
+            self._current_source = "sms"
             self._render_messages([])
+            self._update_compose_state()
             return
         self._current_id = getattr(row, "_conversation_id", None)
+        self._current_source = getattr(row, "_source", "sms")
+        self._update_compose_state()
         self._open_conversation(self._current_id)
+
+    def _update_compose_state(self) -> None:
+        """Active/désactive la zone de saisie selon la source du fil.
+
+        V0.6.0 : les fils RCS sont en **lecture seule** (envoi via RemoteInput
+        prévu en V0.6.1). On désactive donc la saisie pour ces fils.
+        """
+        is_rcs = self._current_source == "rcs"
+        self._entry.set_sensitive(not is_rcs)
+        if is_rcs:
+            self._entry.set_placeholder_text("Réponse RCS indisponible (V0.6.0)")
+            self._send_btn.set_sensitive(False)
+        else:
+            self._entry.set_placeholder_text("Votre message…")
+        self._on_entry_changed(self._entry)
 
     def _on_entry_changed(self, entry: Gtk.Entry) -> None:
         has_text = bool(entry.get_text().strip())
-        self._send_btn.set_sensitive(has_text and self._current_id is not None)
+        can_send = (
+            has_text
+            and self._current_id is not None
+            and self._current_source != "rcs"
+        )
+        self._send_btn.set_sensitive(can_send)
 
     def _on_refresh_clicked(self, _btn: Gtk.Button) -> None:
         if self._current_id is None:
@@ -602,7 +646,10 @@ class SmsWindow(Gtk.Window):
         self._bubbles.append(bubble)
         column.append(bubble)
 
-        time_lbl = Gtk.Label(label=_fmt_time(message.timestamp))
+        time_text = _fmt_time(message.timestamp)
+        if message.source == "rcs":
+            time_text += " · RCS"
+        time_lbl = Gtk.Label(label=time_text)
         time_lbl.set_halign(align)
         time_lbl.add_css_class("sms-time")
         column.append(time_lbl)

@@ -85,6 +85,7 @@ class HealthStatus:
     reachable: bool                 # le serveur a répondu
     sms_permission: bool = False    # READ_SMS + SEND_SMS accordées
     default_sms_app: bool = False
+    notification_access: bool = False  # accès aux notifications (RCS) accordé
     app_version: str = ""
     device: str = ""
     detail: str = ""                # message lisible pour l'UI
@@ -101,6 +102,19 @@ class BridgeMessage:
     body: str
     timestamp: datetime
     outgoing: bool
+
+
+@dataclass(frozen=True)
+class RcsThread:
+    """Fil RCS capté via les notifications (``GET /rcs/messages``).
+
+    Contrairement à une conversation SMS, le fil porte directement ses messages
+    (pas de second appel) : la fenêtre disponible est de toute façon limitée à ce
+    que les notifications ont laissé voir (cf. ``docs/rcs-v0.6.md``).
+    """
+    id: str
+    contact_name: str
+    messages: list["BridgeMessage"]
 
 
 @dataclass(frozen=True)
@@ -162,6 +176,7 @@ class AndroidBridge:
             return HealthStatus(
                 reachable=False,
                 sms_permission=False,
+                notification_access=False,
                 detail="Mode démo — aucune app compagnon Android connectée",
             )
         try:
@@ -173,6 +188,7 @@ class AndroidBridge:
             reachable=True,
             sms_permission=bool(data.get("sms_permission", False)),
             default_sms_app=bool(data.get("default_sms_app", False)),
+            notification_access=bool(data.get("notification_access", False)),
             app_version=str(data.get("app_version", "")),
             device=str(data.get("device", "")),
             detail="Connecté",
@@ -200,6 +216,23 @@ class AndroidBridge:
             "GET", "/messages", params={"conversation_id": conversation_id}
         )
         return [_parse_message(m) for m in data.get("messages", [])]
+
+    def list_rcs(self) -> list[RcsThread]:
+        """Lister les fils RCS captés via notifications (``GET /rcs/messages``).
+
+        En mode mock, renvoie une liste vide (aucune notification réelle). En
+        HTTP, parse ``{ "conversations": [ {id, contact_name, messages:[…]} ] }``.
+        Ne lève jamais : un échec réseau renvoie une liste vide (le RCS est un
+        complément, il ne doit pas casser l'affichage des SMS).
+        """
+        if self.mode is BridgeMode.MOCK:
+            return []
+        try:
+            data = self._request("GET", "/rcs/messages")
+        except BridgeError as exc:
+            logger.warning("android_bridge: /rcs/messages indisponible: %s", exc)
+            return []
+        return [_parse_rcs_thread(t) for t in data.get("conversations", [])]
 
     def send_message(
         self,
@@ -413,6 +446,14 @@ def _parse_message(raw: dict) -> BridgeMessage:
         body=str(raw.get("body", "")),
         timestamp=_epoch_ms_to_dt(raw.get("timestamp")) or datetime.now(),
         outgoing=bool(raw.get("outgoing", False)),
+    )
+
+
+def _parse_rcs_thread(raw: dict) -> RcsThread:
+    return RcsThread(
+        id=str(raw.get("id", "")),
+        contact_name=str(raw.get("contact_name", "")),
+        messages=[_parse_message(m) for m in raw.get("messages", [])],
     )
 
 
@@ -661,6 +702,10 @@ def list_conversations() -> list[BridgeConversation]:
 
 def list_messages(conversation_id: str) -> list[BridgeMessage]:
     return get_bridge().list_messages(conversation_id)
+
+
+def list_rcs() -> list[RcsThread]:
+    return get_bridge().list_rcs()
 
 
 def send_message(

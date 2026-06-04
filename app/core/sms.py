@@ -41,10 +41,11 @@ logger = get_logger(__name__)
 
 @dataclass(frozen=True)
 class Message:
-    """A single SMS, immutable once created."""
+    """A single message, immutable once created."""
     body: str
     timestamp: datetime
     outgoing: bool  # True = sent from this side, False = received from the contact
+    source: str = "sms"  # "sms" (Telephony) | "rcs" (capté via notifications)
 
 
 @dataclass
@@ -54,6 +55,7 @@ class Conversation:
     contact_name: str
     phone_number: str
     messages: list[Message] = field(default_factory=list)
+    source: str = "sms"  # "sms" | "rcs" — origine du fil, pour l'UI (badge)
 
     @property
     def last_message(self) -> Optional[Message]:
@@ -216,8 +218,13 @@ class AndroidCompanionBackend(SmsBackend):
             logger.warning("AndroidCompanionBackend: health check failed: %s", exc)
             return False
 
+    #: Préfixe des ids de conversation RCS (captées via notifications). Permet de
+    #: router get_conversation() sans les confondre avec un thread_id SMS.
+    RCS_ID_PREFIX = "rcs:"
+
     def list_conversations(self) -> list[Conversation]:
         convos: list[Conversation] = []
+        # 1) Conversations SMS/MMS (provider Telephony).
         for bc in self._bridge.list_conversations():
             # The /conversations summary carries only the last message preview,
             # not the full thread — synthesize a single Message so the list view
@@ -238,11 +245,43 @@ class AndroidCompanionBackend(SmsBackend):
                     contact_name=bc.contact_name,
                     phone_number=bc.phone_number,
                     messages=messages,
+                    source="sms",
                 )
             )
+
+        # 2) Fils RCS captés via notifications (lecture seule, V0.6.0). Gardés
+        # comme entrées distinctes (id préfixé) avec un badge côté UI : on ne les
+        # fusionne pas au thread SMS du même contact (appariement non fiable).
+        for thread in self._bridge.list_rcs():
+            last = thread.messages[-1] if thread.messages else None
+            convos.append(
+                Conversation(
+                    id=self.RCS_ID_PREFIX + thread.id,
+                    contact_name=thread.contact_name,
+                    phone_number="",
+                    messages=[
+                        Message(
+                            body=last.body,
+                            timestamp=last.timestamp,
+                            outgoing=last.outgoing,
+                            source="rcs",
+                        )
+                    ] if last else [],
+                    source="rcs",
+                )
+            )
+
+        # Tri global : conversation la plus récemment active en premier.
+        convos.sort(
+            key=lambda c: c.last_message.timestamp if c.last_message else datetime.min,
+            reverse=True,
+        )
         return convos
 
     def get_conversation(self, conversation_id: str) -> Optional[Conversation]:
+        if conversation_id.startswith(self.RCS_ID_PREFIX):
+            return self._get_rcs_conversation(conversation_id)
+
         # Metadata (name/number) lives in the conversation summary; the full
         # thread comes from /messages. Two calls, but keeps the bridge contract
         # simple and matches docs/android-backend-v0.4.md.
@@ -261,6 +300,24 @@ class AndroidCompanionBackend(SmsBackend):
             contact_name=meta.contact_name,
             phone_number=meta.phone_number,
             messages=messages,
+            source="sms",
+        )
+
+    def _get_rcs_conversation(self, conversation_id: str) -> Optional[Conversation]:
+        raw_id = conversation_id[len(self.RCS_ID_PREFIX):]
+        thread = next((t for t in self._bridge.list_rcs() if t.id == raw_id), None)
+        if thread is None:
+            return None
+        return Conversation(
+            id=conversation_id,
+            contact_name=thread.contact_name,
+            phone_number="",
+            messages=[
+                Message(body=m.body, timestamp=m.timestamp, outgoing=m.outgoing,
+                        source="rcs")
+                for m in thread.messages
+            ],
+            source="rcs",
         )
 
     def send_message(self, conversation_id: str, body: str) -> tuple[bool, str]:

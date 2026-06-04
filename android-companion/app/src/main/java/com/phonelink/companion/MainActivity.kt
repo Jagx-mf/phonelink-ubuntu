@@ -1,8 +1,10 @@
 package com.phonelink.companion
 
 import android.Manifest
+import android.content.Intent
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -51,6 +53,7 @@ class MainActivity : AppCompatActivity() {
             toast(getString(R.string.pin_regenerated))
         }
         binding.btnRequestSms.setOnClickListener { requestSmsPermissions() }
+        binding.btnNotifAccess.setOnClickListener { openNotificationAccessSettings() }
 
         render()
     }
@@ -117,8 +120,23 @@ class MainActivity : AppCompatActivity() {
         )
         binding.btnRequestSms.isEnabled = !smsOk
 
+        val rcsOk = RcsNotificationListener.hasAccess(this)
+        binding.txtRcs.text = getString(
+            if (rcsOk) R.string.rcs_access_on else R.string.rcs_access_off
+        )
+        binding.btnNotifAccess.isEnabled = !rcsOk
+
         binding.btnStart.isEnabled = !running
         binding.btnStop.isEnabled = running
+    }
+
+    private fun openNotificationAccessSettings() {
+        // Pas de permission runtime : on ouvre le réglage système dédié.
+        try {
+            startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+        } catch (e: Exception) {
+            toast(getString(R.string.start_error, e.message ?: ""))
+        }
     }
 
     private fun deviceName(): String =
