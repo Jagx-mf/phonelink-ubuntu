@@ -13,12 +13,20 @@ CONFIG_DIR = Path.home() / ".config" / "phonelink-ubuntu"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
 
+#: Base URL par défaut de l'app compagnon Android (cf. android_bridge).
+DEFAULT_ANDROID_BRIDGE_URL = "http://127.0.0.1:8765"
+
+
 @dataclass
 class PhoneLinkConfig:
     phone_mac: str = ""
     phone_name: str = ""
     adb_wifi_host: str = ""
     adb_wifi_port: int = 5555
+    # App compagnon Android (SMS) — cf. docs/android-backend-v0.4.md
+    android_bridge_base_url: str = DEFAULT_ANDROID_BRIDGE_URL
+    android_bridge_token: str = ""
+    android_bridge_mode: str = "mock"  # "mock" | "http"
 
 
 def get_config_path() -> Path:
@@ -46,6 +54,10 @@ def load_config() -> PhoneLinkConfig:
         phone_name=_as_str(data.get("phone_name")),
         adb_wifi_host=_as_str(data.get("adb_wifi_host")),
         adb_wifi_port=_as_port(data.get("adb_wifi_port")),
+        android_bridge_base_url=_as_str(data.get("android_bridge_base_url"))
+        or DEFAULT_ANDROID_BRIDGE_URL,
+        android_bridge_token=_as_str(data.get("android_bridge_token")),
+        android_bridge_mode=_as_bridge_mode(data.get("android_bridge_mode")),
     )
 
 
@@ -60,6 +72,10 @@ def save_config(config: PhoneLinkConfig | dict[str, Any]) -> None:
             "phone_name": _as_str(config.get("phone_name")),
             "adb_wifi_host": _as_str(config.get("adb_wifi_host")),
             "adb_wifi_port": _as_port(config.get("adb_wifi_port")),
+            "android_bridge_base_url": _as_str(config.get("android_bridge_base_url"))
+            or DEFAULT_ANDROID_BRIDGE_URL,
+            "android_bridge_token": _as_str(config.get("android_bridge_token")),
+            "android_bridge_mode": _as_bridge_mode(config.get("android_bridge_mode")),
         }
 
     try:
@@ -76,6 +92,11 @@ def save_config(config: PhoneLinkConfig | dict[str, Any]) -> None:
 
 def _as_str(value: Any) -> str:
     return value if isinstance(value, str) else ""
+
+
+def _as_bridge_mode(value: Any) -> str:
+    """Coerce a value into a valid bridge mode, defaulting to 'mock'."""
+    return value if value in ("mock", "http") else "mock"
 
 
 def _as_port(value: Any) -> int:

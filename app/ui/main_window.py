@@ -22,6 +22,7 @@ from app.core import photos as photos_core
 from app.core import system_checks
 from app.core.config import PhoneLinkConfig, load_config, save_config
 from app.ui.gallery_window import GalleryWindow
+from app.ui.sms_window import SmsWindow
 from app.ui.widgets import show_dialog
 from app.utils.commands import launch_background, is_installed
 from app.utils.logger import get_logger
@@ -114,6 +115,7 @@ class MainWindow(_Base):
             ("Ouvrir pavucontrol",          "audio-volume-high-symbolic",          self._on_pavucontrol),
             ("Mode appel — guide",          "phone-symbolic",                      self._on_call_mode),
             ("Afficher téléphone (scrcpy)", "video-display-symbolic",              self._on_scrcpy),
+            ("Messages (SMS)",              "user-available-symbolic",             self._on_open_sms),
             ("Importer photos",             "camera-photo-symbolic",               self._on_import_photos),
             ("Galerie photos",              "image-x-generic-symbolic",            self._on_open_gallery),
             ("Ouvrir dossier photos",       "folder-pictures-symbolic",            self._on_open_photos),
@@ -253,6 +255,7 @@ class MainWindow(_Base):
             ("Ouvrir pavucontrol",          self._on_pavucontrol),
             ("Mode appel — guide",          self._on_call_mode),
             ("Afficher téléphone (scrcpy)", self._on_scrcpy),
+            ("Messages (SMS)",              self._on_open_sms),
             ("Importer photos",             self._on_import_photos),
             ("Galerie photos",              self._on_open_gallery),
             ("Ouvrir dossier photos",       self._on_open_photos),
@@ -451,6 +454,10 @@ class MainWindow(_Base):
     def _on_open_gallery(self, _):
         gallery = GalleryWindow(parent=self)
         gallery.present()
+
+    def _on_open_sms(self, _):
+        sms = SmsWindow(parent=self)
+        sms.present()
 
     def _on_open_photos(self, _):
         ok, msg = photos_core.open_local_folder()

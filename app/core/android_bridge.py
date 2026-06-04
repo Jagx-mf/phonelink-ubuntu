@@ -1,0 +1,601 @@
+"""Client de l'app compagnon Android — couche transport (V0.4, mockable).
+
+Ce module est le **client HTTP local** qui interrogera l'application compagnon
+Android décrite dans ``docs/android-backend-v0.4.md``. En V0.4 il fonctionne en
+mode **mock** : aucune connexion réseau réelle n'est faite, des données fictives
+sont renvoyées pour permettre de développer et tester la couche Ubuntu avant que
+l'app Android n'existe.
+
+Le transport HTTP local est maintenant implémenté (``BridgeMode.HTTP``) avec la
+**bibliothèque standard uniquement** (``urllib``) — aucune dépendance PyPI. Le
+mode ``MOCK`` reste le défaut et n'est jamais cassé : passer en HTTP se fait par
+paramètre (``mode=BridgeMode.HTTP``) ou via la variable d'environnement
+``PHONELINK_BRIDGE_MODE``.
+
+Les fonctions de commodité au niveau module (``check_health``,
+``list_conversations``, ``list_messages``, ``send_message``) opèrent sur un pont
+singleton, à l'image de ``get_backend()`` dans ``app/core/sms.py``.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import urllib.error
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from enum import Enum
+from typing import Optional
+
+from app.utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+#: URL de base par défaut : port-forward ADB recommandé (cf. doc §1).
+DEFAULT_BASE_URL = "http://127.0.0.1:8765"
+
+#: Préfixe de version de l'API locale.
+API_PREFIX = "/v1"
+
+#: En-tête User-Agent envoyé à l'app compagnon.
+USER_AGENT = "phonelink-ubuntu/0.4"
+
+#: Variable d'environnement pour forcer le mode du pont (mock | http).
+ENV_MODE = "PHONELINK_BRIDGE_MODE"
+
+#: Variable d'environnement pour la base URL en mode HTTP.
+ENV_BASE_URL = "PHONELINK_BRIDGE_URL"
+
+#: Variable d'environnement pour le token Bearer.
+ENV_TOKEN = "PHONELINK_BRIDGE_TOKEN"
+
+
+class BridgeMode(str, Enum):
+    """Mode de fonctionnement du pont."""
+    MOCK = "mock"   # données fictives, aucun réseau (V0.4)
+    HTTP = "http"   # app compagnon réelle via HTTP local
+
+
+class BridgeError(Exception):
+    """Échec d'une requête vers l'app compagnon (réseau, HTTP, ou JSON).
+
+    Porte un ``status`` HTTP optionnel (``None`` si l'erreur est survenue avant
+    d'obtenir une réponse, p. ex. connexion refusée ou timeout).
+    """
+
+    def __init__(self, message: str, status: Optional[int] = None) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+# ──────────────────────────────────────────────
+# Objets de réponse
+# ──────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class HealthStatus:
+    """Réponse de ``GET /health`` — disponibilité et capacités réelles."""
+    reachable: bool                 # le serveur a répondu
+    sms_permission: bool = False    # READ_SMS + SEND_SMS accordées
+    default_sms_app: bool = False
+    app_version: str = ""
+    device: str = ""
+    detail: str = ""                # message lisible pour l'UI
+
+    @property
+    def usable(self) -> bool:
+        """True seulement si on peut réellement lire/envoyer des SMS."""
+        return self.reachable and self.sms_permission
+
+
+@dataclass(frozen=True)
+class BridgeMessage:
+    """Un SMS tel que renvoyé par l'API (miroir de ``sms.Message``)."""
+    body: str
+    timestamp: datetime
+    outgoing: bool
+
+
+@dataclass(frozen=True)
+class BridgeConversation:
+    """Résumé de conversation renvoyé par ``GET /conversations``."""
+    id: str
+    contact_name: str
+    phone_number: str
+    last_message: str = ""
+    last_timestamp: Optional[datetime] = None
+    unread: int = 0
+
+
+@dataclass(frozen=True)
+class SendResult:
+    """Résultat de ``POST /send``."""
+    sent: bool                      # True = SMS réellement transmis
+    detail: str = ""
+    message: Optional[BridgeMessage] = None
+
+
+# ──────────────────────────────────────────────
+# Le pont
+# ──────────────────────────────────────────────
+
+class AndroidBridge:
+    """Client de l'app compagnon Android.
+
+    En mode ``MOCK`` (défaut), toutes les méthodes renvoient des données
+    fictives sans aucun appel réseau. En mode ``HTTP``, les lectures (``health``,
+    ``conversations``, ``messages``) passent par :meth:`_request` (urllib, stdlib).
+
+    Garde-fou V0.4 : l'**envoi réel** de SMS est désactivé par défaut
+    (``allow_real_send=False``) même en mode HTTP — ``send_message`` ne poste
+    jamais ``/send`` tant que ce drapeau n'est pas explicitement activé.
+    """
+
+    def __init__(
+        self,
+        base_url: str = DEFAULT_BASE_URL,
+        token: Optional[str] = None,
+        mode: BridgeMode = BridgeMode.MOCK,
+        timeout: float = 5.0,
+        allow_real_send: bool = False,
+    ) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.token = token
+        self.mode = mode
+        self.timeout = timeout
+        self.allow_real_send = allow_real_send
+        self._mock = _MockData()
+
+    # ----- API publique --------------------------------------------------
+
+    def check_health(self) -> HealthStatus:
+        """Sonder le service compagnon (``GET /health``)."""
+        if self.mode is BridgeMode.MOCK:
+            logger.debug("android_bridge: check_health (mock)")
+            return HealthStatus(
+                reachable=False,
+                sms_permission=False,
+                detail="Mode démo — aucune app compagnon Android connectée",
+            )
+        data = self._request("GET", "/health")
+        return HealthStatus(
+            reachable=True,
+            sms_permission=bool(data.get("sms_permission", False)),
+            default_sms_app=bool(data.get("default_sms_app", False)),
+            app_version=str(data.get("app_version", "")),
+            device=str(data.get("device", "")),
+            detail="Connecté",
+        )
+
+    def list_conversations(self) -> list[BridgeConversation]:
+        """Lister les conversations (``GET /conversations``)."""
+        if self.mode is BridgeMode.MOCK:
+            logger.debug("android_bridge: list_conversations (mock)")
+            return self._mock.conversations()
+        data = self._request("GET", "/conversations")
+        return [_parse_conversation(c) for c in data.get("conversations", [])]
+
+    def list_messages(self, conversation_id: str) -> list[BridgeMessage]:
+        """Lister les messages d'une conversation (``GET /messages``)."""
+        if self.mode is BridgeMode.MOCK:
+            logger.debug("android_bridge: list_messages %s (mock)", conversation_id)
+            return self._mock.messages(conversation_id)
+        data = self._request(
+            "GET", "/messages", params={"conversation_id": conversation_id}
+        )
+        return [_parse_message(m) for m in data.get("messages", [])]
+
+    def send_message(
+        self,
+        body: str,
+        conversation_id: Optional[str] = None,
+        phone_number: Optional[str] = None,
+    ) -> SendResult:
+        """Envoyer un SMS (``POST /send``).
+
+        Fournir ``conversation_id`` (fil existant) **ou** ``phone_number``
+        (nouveau fil). En mode mock, rien n'est transmis.
+        """
+        body = body.strip()
+        if not body:
+            return SendResult(sent=False, detail="Message vide")
+        if not conversation_id and not phone_number:
+            return SendResult(
+                sent=False, detail="conversation_id ou phone_number requis"
+            )
+
+        if self.mode is BridgeMode.MOCK:
+            logger.info(
+                "android_bridge: send_message (mock) → %s%s: %r",
+                conversation_id or "", phone_number or "", body,
+            )
+            echo = BridgeMessage(body=body, timestamp=datetime.now(), outgoing=True)
+            return SendResult(
+                sent=False,
+                detail="Message simulé — app compagnon Android requise",
+                message=echo,
+            )
+
+        # Garde-fou V0.4 : ne jamais transmettre un vrai SMS tant que l'envoi
+        # réel n'est pas explicitement autorisé, même connecté en HTTP.
+        if not self.allow_real_send:
+            logger.info(
+                "android_bridge: send_message bloqué (allow_real_send=False) → %s%s",
+                conversation_id or "", phone_number or "",
+            )
+            echo = BridgeMessage(body=body, timestamp=datetime.now(), outgoing=True)
+            return SendResult(
+                sent=False,
+                detail="Envoi réel désactivé (allow_real_send=False)",
+                message=echo,
+            )
+
+        payload: dict[str, str] = {"body": body}
+        if conversation_id:
+            payload["conversation_id"] = conversation_id
+        if phone_number:
+            payload["phone_number"] = phone_number
+        data = self._request("POST", "/send", json_body=payload)
+        raw_msg = data.get("message")
+        return SendResult(
+            sent=bool(data.get("sent", False)),
+            detail=str(data.get("error") or data.get("detail") or ""),
+            message=_parse_message(raw_msg) if raw_msg else None,
+        )
+
+    def pair(self, pin: str) -> str:
+        """S'appairer avec l'app compagnon (``POST /v1/pair``).
+
+        Échange le **code PIN** affiché par l'app Android contre un **token**
+        Bearer persistant (cf. ``docs/android-backend-v0.4.md`` §5). Sur succès,
+        ``self.token`` est mis à jour et le token est renvoyé.
+
+        L'appairage est une opération réseau réelle : elle s'effectue quel que
+        soit ``self.mode`` (il n'y a rien à simuler côté mock).
+
+        Lève :class:`BridgeError` si :
+
+        - le PIN est vide ;
+        - le serveur répond 401/403 (PIN invalide/expiré) ou tout autre statut ;
+        - la réponse n'est pas un JSON valide ;
+        - la réponse ne contient pas de ``token`` exploitable ;
+        - le serveur est injoignable (timeout, connexion refusée).
+        """
+        pin = (pin or "").strip()
+        if not pin:
+            raise BridgeError("PIN vide")
+
+        # _request convertit déjà réseau/HTTP/JSON en BridgeError (avec status).
+        data = self._request(
+            "POST", "/pair", json_body={"pin": pin, "client": USER_AGENT}
+        )
+        token = data.get("token")
+        if not token or not isinstance(token, str):
+            raise BridgeError("Réponse d'appairage sans token exploitable")
+
+        self.token = token
+        logger.info("android_bridge: appairage réussi (token reçu)")
+        return token
+
+    # ----- transport HTTP (urllib, stdlib) -------------------------------
+
+    def _build_url(self, path: str, params: Optional[dict]) -> str:
+        """Construire ``base_url + API_PREFIX + path`` avec query-string encodée."""
+        url = self.base_url + API_PREFIX + "/" + path.lstrip("/")
+        if params:
+            # Ignore les paramètres None ; encode proprement le reste.
+            clean = {k: v for k, v in params.items() if v is not None}
+            if clean:
+                url += "?" + urllib.parse.urlencode(clean)
+        return url
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        params: Optional[dict] = None,
+        json_body: Optional[dict] = None,
+    ) -> dict:
+        """Effectuer une requête HTTP JSON vers l'app compagnon (stdlib only).
+
+        - ``method`` : ``"GET"`` ou ``"POST"``.
+        - ``params`` : query-string (GET) ; les valeurs ``None`` sont ignorées.
+        - ``json_body`` : corps JSON (POST).
+
+        Ajoute ``Authorization: Bearer <token>`` si un token est présent, applique
+        ``self.timeout``, et renvoie le JSON décodé (toujours un ``dict`` :
+        une réponse vide donne ``{}``).
+
+        Lève :class:`BridgeError` pour toute erreur réseau, HTTP (4xx/5xx) ou
+        JSON invalide — jamais d'exception ``urllib`` brute ne remonte.
+        """
+        url = self._build_url(path, params)
+
+        data: Optional[bytes] = None
+        headers = {
+            "Accept": "application/json",
+            "User-Agent": USER_AGENT,
+        }
+        if json_body is not None:
+            data = json.dumps(json_body).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+
+        req = urllib.request.Request(
+            url, data=data, headers=headers, method=method.upper()
+        )
+        logger.debug("android_bridge: %s %s", method.upper(), url)
+
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                raw = resp.read()
+        except urllib.error.HTTPError as exc:
+            # Réponse reçue mais statut d'erreur (4xx/5xx). Le corps peut porter
+            # un message JSON ({"error": ...}) qu'on remonte si présent.
+            body = b""
+            try:
+                body = exc.read()
+            except Exception:  # pragma: no cover - lecture best-effort
+                pass
+            detail = _extract_error(body) or exc.reason or "erreur HTTP"
+            raise BridgeError(
+                f"HTTP {exc.code} sur {path}: {detail}", status=exc.code
+            ) from exc
+        except urllib.error.URLError as exc:
+            # Pas de réponse : connexion refusée, DNS, timeout réseau, etc.
+            raise BridgeError(
+                f"Connexion impossible à {self.base_url}: {exc.reason}"
+            ) from exc
+        except (TimeoutError, OSError) as exc:
+            raise BridgeError(f"Erreur réseau vers {self.base_url}: {exc}") from exc
+
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise BridgeError(f"Réponse JSON invalide sur {path}: {exc}") from exc
+        if not isinstance(parsed, dict):
+            raise BridgeError(
+                f"Réponse JSON inattendue sur {path}: objet attendu, "
+                f"reçu {type(parsed).__name__}"
+            )
+        return parsed
+
+
+# ──────────────────────────────────────────────
+# Parsing JSON → dataclasses
+# ──────────────────────────────────────────────
+
+def _extract_error(body: bytes) -> str:
+    """Extraire un message d'erreur d'un corps de réponse JSON, si possible."""
+    if not body:
+        return ""
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return ""
+    if isinstance(data, dict):
+        return str(data.get("error") or data.get("detail") or "")
+    return ""
+
+
+def _epoch_ms_to_dt(value: object) -> Optional[datetime]:
+    """Convertir un epoch en millisecondes (entier) en ``datetime`` local."""
+    if value in (None, ""):
+        return None
+    try:
+        return datetime.fromtimestamp(int(value) / 1000)
+    except (ValueError, TypeError, OverflowError, OSError):
+        logger.warning("android_bridge: horodatage invalide: %r", value)
+        return None
+
+
+def _parse_message(raw: dict) -> BridgeMessage:
+    return BridgeMessage(
+        body=str(raw.get("body", "")),
+        timestamp=_epoch_ms_to_dt(raw.get("timestamp")) or datetime.now(),
+        outgoing=bool(raw.get("outgoing", False)),
+    )
+
+
+def _parse_conversation(raw: dict) -> BridgeConversation:
+    return BridgeConversation(
+        id=str(raw.get("id", "")),
+        contact_name=str(raw.get("contact_name", "")),
+        phone_number=str(raw.get("phone_number", "")),
+        last_message=str(raw.get("last_message", "")),
+        last_timestamp=_epoch_ms_to_dt(raw.get("last_timestamp")),
+        unread=int(raw.get("unread", 0) or 0),
+    )
+
+
+# ──────────────────────────────────────────────
+# Données fictives (mode mock)
+# ──────────────────────────────────────────────
+
+@dataclass
+class _MockData:
+    """Conversations fictives ancrées sur l'heure courante.
+
+    Volontairement proche du jeu de données de ``MockSmsBackend`` pour offrir une
+    expérience cohérente entre la maquette SMS et ce pont.
+    """
+
+    _threads: dict[str, list[tuple[int, bool, str]]] = field(default_factory=dict)
+    _meta: dict[str, tuple[str, str]] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        # id → (contact, numéro)
+        self._meta = {
+            "1": ("Maman", "+33 6 12 34 56 78"),
+            "2": ("Léa", "+33 6 98 76 54 32"),
+            "3": ("Banque", "36 30"),
+        }
+        # id → liste de (minutes_ago, outgoing, body), anciens → récents
+        self._threads = {
+            "1": [
+                (180, False, "Tu viens manger dimanche ?"),
+                (172, True, "Oui avec plaisir, j'apporte le dessert 🍰"),
+                (170, False, "Parfait, à dimanche mon grand ❤️"),
+            ],
+            "2": [
+                (95, False, "T'as vu le nouveau ciné qui sort ?"),
+                (90, True, "Ouais ! On y va vendredi soir ?"),
+                (88, False, "Carrément, je réserve les places"),
+            ],
+            "3": [
+                (50, False, "Code de confirmation : 482917. Ne le partagez jamais."),
+            ],
+        }
+
+    def messages(self, conversation_id: str) -> list[BridgeMessage]:
+        now = datetime.now()
+        items = self._threads.get(conversation_id, [])
+        return [
+            BridgeMessage(
+                body=body,
+                timestamp=now - timedelta(minutes=mins),
+                outgoing=outgoing,
+            )
+            for (mins, outgoing, body) in items
+        ]
+
+    def conversations(self) -> list[BridgeConversation]:
+        convos: list[BridgeConversation] = []
+        for cid, (contact, number) in self._meta.items():
+            msgs = self.messages(cid)
+            last = msgs[-1] if msgs else None
+            convos.append(
+                BridgeConversation(
+                    id=cid,
+                    contact_name=contact,
+                    phone_number=number,
+                    last_message=last.body if last else "",
+                    last_timestamp=last.timestamp if last else None,
+                )
+            )
+        convos.sort(
+            key=lambda c: c.last_timestamp or datetime.min, reverse=True
+        )
+        return convos
+
+
+# ──────────────────────────────────────────────
+# Pont singleton + fonctions de commodité
+# ──────────────────────────────────────────────
+
+_bridge: Optional[AndroidBridge] = None
+
+
+def _bridge_from_env() -> AndroidBridge:
+    """Construire un pont d'après l'environnement (mock par défaut).
+
+    - ``PHONELINK_BRIDGE_MODE`` : ``mock`` (défaut) | ``http``
+    - ``PHONELINK_BRIDGE_URL``  : base URL si mode http (défaut DEFAULT_BASE_URL)
+    - ``PHONELINK_BRIDGE_TOKEN``: token Bearer optionnel
+
+    L'envoi réel reste désactivé (``allow_real_send=False``) : il ne s'active pas
+    par l'environnement, seulement par construction explicite.
+    """
+    mode_key = os.environ.get(ENV_MODE, "mock").strip().lower()
+    mode = BridgeMode.HTTP if mode_key == "http" else BridgeMode.MOCK
+    return AndroidBridge(
+        base_url=os.environ.get(ENV_BASE_URL, DEFAULT_BASE_URL),
+        token=os.environ.get(ENV_TOKEN) or None,
+        mode=mode,
+    )
+
+
+def get_bridge() -> AndroidBridge:
+    """Retourner le pont actif (singleton paresseux, configuré par l'env)."""
+    global _bridge
+    if _bridge is None:
+        _bridge = _bridge_from_env()
+        logger.info("android_bridge: pont actif en mode %s", _bridge.mode.value)
+    return _bridge
+
+
+def set_bridge(bridge: Optional[AndroidBridge]) -> None:
+    """Remplacer le pont actif (tests, ou bascule vers le mode HTTP).
+
+    Passer ``None`` vide le cache : le prochain :func:`get_bridge` reconstruit
+    depuis l'environnement.
+    """
+    global _bridge
+    _bridge = bridge
+
+
+# ──────────────────────────────────────────────
+# Intégration avec la configuration persistante
+# ──────────────────────────────────────────────
+
+def bridge_from_config() -> AndroidBridge:
+    """Construire un :class:`AndroidBridge` depuis la config persistée.
+
+    Lit ``android_bridge_base_url`` / ``android_bridge_token`` /
+    ``android_bridge_mode`` via :mod:`app.core.config`. L'envoi réel reste
+    désactivé (``allow_real_send=False``).
+    """
+    from app.core import config  # import local : évite tout couplage au chargement
+
+    cfg = config.load_config()
+    mode = BridgeMode.HTTP if cfg.android_bridge_mode == "http" else BridgeMode.MOCK
+    return AndroidBridge(
+        base_url=cfg.android_bridge_base_url or DEFAULT_BASE_URL,
+        token=cfg.android_bridge_token or None,
+        mode=mode,
+    )
+
+
+def pair_and_save(pin: str, base_url: Optional[str] = None) -> str:
+    """Appairer avec l'app compagnon **et persister** le token en config.
+
+    - construit un pont HTTP vers ``base_url`` (ou l'URL déjà en config) ;
+    - appelle :meth:`AndroidBridge.pair` (peut lever :class:`BridgeError`) ;
+    - sur succès, enregistre token + URL et bascule ``android_bridge_mode`` sur
+      ``"http"`` dans la config, puis remplace le pont actif.
+
+    Renvoie le token. Ne touche pas au garde-fou d'envoi réel.
+    """
+    from app.core import config  # import local
+
+    cfg = config.load_config()
+    url = base_url or cfg.android_bridge_base_url or DEFAULT_BASE_URL
+
+    bridge = AndroidBridge(base_url=url, mode=BridgeMode.HTTP)
+    token = bridge.pair(pin)  # BridgeError remonte telle quelle si échec
+
+    cfg.android_bridge_base_url = url
+    cfg.android_bridge_token = token
+    cfg.android_bridge_mode = "http"
+    config.save_config(cfg)
+
+    set_bridge(bridge)  # le pont appairé devient le pont actif
+    logger.info("android_bridge: token persisté en configuration")
+    return token
+
+
+def check_health() -> HealthStatus:
+    return get_bridge().check_health()
+
+
+def list_conversations() -> list[BridgeConversation]:
+    return get_bridge().list_conversations()
+
+
+def list_messages(conversation_id: str) -> list[BridgeMessage]:
+    return get_bridge().list_messages(conversation_id)
+
+
+def send_message(
+    body: str,
+    conversation_id: Optional[str] = None,
+    phone_number: Optional[str] = None,
+) -> SendResult:
+    return get_bridge().send_message(
+        body, conversation_id=conversation_id, phone_number=phone_number
+    )
