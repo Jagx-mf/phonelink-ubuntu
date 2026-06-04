@@ -39,6 +39,11 @@ class SmsWindow(Gtk.Window):
 
         self._backend = sms_core.get_backend()
         self._current_id: str | None = None
+        # Largeur dynamique des bulles : on suit les labels affichés et on
+        # recalcule leur largeur max selon la place réelle (cf. do_size_allocate).
+        self._bubbles: list[Gtk.Label] = []
+        self._bubble_max_chars = self._BUBBLE_MAX_CHARS
+        self._char_px: float | None = None
         self._install_css()
 
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -58,6 +63,9 @@ class SmsWindow(Gtk.Window):
         paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
         paned.set_vexpand(True)
         paned.set_position(280)
+        # Déplacer le séparateur change la largeur de la zone messages sans
+        # redimensionner la fenêtre : on recalcule alors la largeur des bulles.
+        paned.connect("notify::position", lambda *_: self._update_bubble_width())
         outer.append(paned)
 
         paned.set_start_child(self._build_conversation_list())
@@ -218,6 +226,7 @@ class SmsWindow(Gtk.Window):
             nxt = child.get_next_sibling()
             self._thread_box.remove(child)
             child = nxt
+        self._bubbles.clear()
 
         if self._current_id is None:
             return
@@ -227,6 +236,9 @@ class SmsWindow(Gtk.Window):
 
         for message in convo.messages:
             self._thread_box.append(self._bubble(message))
+        # Ajuste tout de suite à la place actuelle (sinon valeur par défaut
+        # jusqu'au prochain redimensionnement).
+        self._update_bubble_width()
 
         # Scroll to the latest message after layout settles.
         adj = self._thread_scroll.get_vadjustment()
@@ -256,10 +268,12 @@ class SmsWindow(Gtk.Window):
         bubble.set_halign(align)
         bubble.set_hexpand(False)
         # Borne la largeur naturelle → la bulle ne dépasse pas cette largeur et
-        # le texte revient à la ligne au-delà.
-        bubble.set_max_width_chars(self._BUBBLE_MAX_CHARS)
+        # le texte revient à la ligne au-delà. La valeur est recalculée
+        # dynamiquement selon la place disponible (cf. _update_bubble_width).
+        bubble.set_max_width_chars(self._bubble_max_chars)
         bubble.add_css_class("sms-bubble")
         bubble.add_css_class("sms-out" if message.outgoing else "sms-in")
+        self._bubbles.append(bubble)
         column.append(bubble)
 
         time_lbl = Gtk.Label(label=_fmt_time(message.timestamp))
@@ -267,6 +281,49 @@ class SmsWindow(Gtk.Window):
         time_lbl.add_css_class("sms-time")
         column.append(time_lbl)
         return column
+
+    # ── largeur dynamique des bulles ─────────────
+
+    #: Part de la zone messages occupée au maximum par une bulle.
+    _BUBBLE_WIDTH_RATIO = 0.65
+
+    def do_size_allocate(self, width: int, height: int, baseline: int) -> None:
+        # Laisse GTK allouer les enfants d'abord (la zone messages obtient sa
+        # largeur), puis on ajuste la largeur max des bulles.
+        Gtk.Window.do_size_allocate(self, width, height, baseline)
+        self._update_bubble_width()
+
+    def _update_bubble_width(self) -> None:
+        """Recalcule la largeur max des bulles (~65 % de la zone messages).
+
+        Robuste : si la mesure n'est pas encore disponible ou échoue, on garde
+        la borne fixe :attr:`_BUBBLE_MAX_CHARS` comme fallback.
+        """
+        area = self._thread_scroll.get_width()
+        if area <= 1:
+            return  # pas encore alloué : on garde la valeur courante
+        char_px = self._approx_char_px()
+        target = int((area * self._BUBBLE_WIDTH_RATIO) / char_px)
+        # Borne raisonnable : jamais trop étroit, jamais au-delà du fallback ×2.
+        target = max(20, min(target, self._BUBBLE_MAX_CHARS * 2))
+        if target == self._bubble_max_chars:
+            return  # rien à faire → évite des relayouts inutiles
+        self._bubble_max_chars = target
+        for bubble in self._bubbles:
+            bubble.set_max_width_chars(target)
+
+    def _approx_char_px(self) -> float:
+        """Largeur approx. d'un caractère, en px, pour convertir px → chars.
+
+        Mesurée une fois via Pango sur un échantillon de texte réaliste, puis
+        mémorisée. Sert uniquement à approcher la cible 60–70 %.
+        """
+        if self._char_px is None:
+            sample = "the quick brown fox jumps over the lazy dog "
+            layout = self.create_pango_layout(sample)
+            px, _ = layout.get_pixel_size()
+            self._char_px = max(1.0, px / len(sample))
+        return self._char_px
 
 
 def _fmt_time(ts: datetime) -> str:
