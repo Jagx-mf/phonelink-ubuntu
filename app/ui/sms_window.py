@@ -12,7 +12,8 @@ from datetime import datetime
 
 import gi
 gi.require_version("Gtk", "4.0")
-from gi.repository import Gtk, Gdk
+gi.require_version("Pango", "1.0")
+from gi.repository import Gtk, Gdk, Pango
 
 from app.core import sms as sms_core
 from app.utils.logger import get_logger
@@ -34,7 +35,7 @@ class SmsWindow(Gtk.Window):
     def __init__(self, parent: Gtk.Window):
         super().__init__(transient_for=parent, modal=False)
         self.set_title("Messages")
-        self.set_default_size(860, 600)
+        self.set_default_size(1000, 700)
 
         self._backend = sms_core.get_backend()
         self._current_id: str | None = None
@@ -232,16 +233,31 @@ class SmsWindow(Gtk.Window):
         if adj is not None:
             adj.set_value(adj.get_upper())
 
+    #: Largeur maximale d'une bulle, en caractères (≈ 60 % de la zone messages à
+    #: la taille par défaut). Borne la largeur ET force le retour à la ligne.
+    _BUBBLE_MAX_CHARS = 44
+
     def _bubble(self, message: sms_core.Message) -> Gtk.Widget:
         align = Gtk.Align.END if message.outgoing else Gtk.Align.START
 
+        # La colonne ne s'étire pas : alignée à gauche (reçu) / droite (envoyé),
+        # elle se réduit à la largeur de la bulle.
         column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         column.set_halign(align)
+        column.set_hexpand(False)
 
         bubble = Gtk.Label(label=message.body)
         bubble.set_wrap(True)
+        # WORD_CHAR : coupe sur les mots, et À L'INTÉRIEUR d'un mot si besoin.
+        # Indispensable pour les vrais SMS (codes, URLs, longs numéros) qui ne
+        # contiennent pas d'espace et débordaient sinon sur une seule ligne.
+        bubble.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
         bubble.set_xalign(0)
-        bubble.set_max_width_chars(40)
+        bubble.set_halign(align)
+        bubble.set_hexpand(False)
+        # Borne la largeur naturelle → la bulle ne dépasse pas cette largeur et
+        # le texte revient à la ligne au-delà.
+        bubble.set_max_width_chars(self._BUBBLE_MAX_CHARS)
         bubble.add_css_class("sms-bubble")
         bubble.add_css_class("sms-out" if message.outgoing else "sms-in")
         column.append(bubble)
