@@ -1,24 +1,30 @@
 package com.phonelink.companion
 
-import org.json.JSONArray
+import android.content.Context
+import android.util.Log
 import org.json.JSONObject
+import org.json.JSONArray
+import java.io.File
 import java.util.Collections
 
 /**
- * Cache mémoire simple des messages RCS capturés via les notifications
- * (cf. [RcsNotificationListener] et docs/rcs-v0.6.md).
+ * Cache des messages RCS captés via les notifications (cf. [RcsNotificationListener]
+ * et docs/rcs-v0.6.md).
  *
- * V0.6.0 : **volatil** (perdu si le service est tué), **lecture seule**. Pas de
- * persistance ni de déduplication forte — on évite seulement les doublons
- * évidents (même horodatage + même corps dans un fil).
+ * V0.6.0 (révisé) :
+ *  - **accumulateur** : on conserve les messages déjà vus même s'ils quittent les
+ *    notifications actives (KDE Connect, lui, ne re-dérive que le live) ;
+ *  - **persistance locale** (JSON dans `filesDir`) : survit au redémarrage du
+ *    service/app — ce qui dépasse KDE Connect, qui ne persiste pas ;
+ *  - **dédup** par fil (clé `timestamp|body`).
  *
- * Thread-safe : les notifications arrivent sur le thread du service tandis que
- * le serveur HTTP lit sur ses propres threads.
+ * Thread-safe : notifications (thread du service) + lectures HTTP (threads serveur).
  */
 object RcsMessageStore {
 
-    /** Nombre max de messages conservés par conversation (fenêtre récente). */
-    private const val MAX_PER_THREAD = 200
+    private const val TAG = "RcsStore"
+    private const val MAX_PER_THREAD = 500
+    private const val STORE_FILE = "rcs_store.json"
 
     private data class Msg(
         val body: String,
@@ -29,17 +35,21 @@ object RcsMessageStore {
 
     private class Thread(var contactName: String) {
         val messages = ArrayList<Msg>()
-        val seen = HashSet<String>()  // clé de dedup "timestamp|body"
+        val seen = HashSet<String>()
     }
 
-    // conversationKey → Thread
     private val threads = Collections.synchronizedMap(LinkedHashMap<String, Thread>())
 
-    /**
-     * Ajoute un message capté. [conversationKey] identifie le fil (titre de
-     * conversation ou expéditeur). Les doublons (même horodatage + corps) sont
-     * ignorés.
-     */
+    @Volatile
+    private var appContext: Context? = null
+
+    /** À appeler une fois (service onCreate) : mémorise le contexte et charge le disque. */
+    fun attach(context: Context) {
+        appContext = context.applicationContext
+        loadFromDisk()
+    }
+
+    /** Ajoute un message (dédup) puis persiste. Renvoie true si nouveau. */
     fun add(
         conversationKey: String,
         contactName: String,
@@ -47,28 +57,40 @@ object RcsMessageStore {
         timestamp: Long,
         outgoing: Boolean,
         sender: String,
-    ) {
-        if (body.isBlank()) return
+    ): Boolean {
+        val added = addInternal(conversationKey, contactName, body, timestamp, outgoing, sender)
+        if (added) persist()
+        return added
+    }
+
+    private fun addInternal(
+        conversationKey: String,
+        contactName: String,
+        body: String,
+        timestamp: Long,
+        outgoing: Boolean,
+        sender: String,
+    ): Boolean {
+        if (body.isBlank() || conversationKey.isBlank()) return false
         synchronized(threads) {
             val thread = threads.getOrPut(conversationKey) { Thread(contactName) }
             if (contactName.isNotBlank()) thread.contactName = contactName
             val dedupKey = "$timestamp|$body"
-            if (!thread.seen.add(dedupKey)) return  // déjà vu
+            if (!thread.seen.add(dedupKey)) return false
             thread.messages.add(Msg(body, timestamp, outgoing, sender))
             thread.messages.sortBy { it.timestamp }
-            // Borne la fenêtre : on garde les plus récents.
             while (thread.messages.size > MAX_PER_THREAD) {
                 val removed = thread.messages.removeAt(0)
                 thread.seen.remove("${removed.timestamp}|${removed.body}")
             }
+            return true
         }
     }
 
     /**
      * Instantané JSON, le plus récent en premier :
      * `{ "conversations": [ {id, contact_name, last_timestamp,
-     * messages: [{body, timestamp, outgoing, sender}, …]} ] }`.
-     * Messages d'un fil triés ancien → récent (pour l'affichage).
+     * messages:[{body,timestamp,outgoing,sender}]} ] }`.
      */
     fun snapshot(): JSONObject {
         val conversations = JSONArray()
@@ -99,8 +121,56 @@ object RcsMessageStore {
         return JSONObject().put("conversations", conversations)
     }
 
-    /** Vide le cache (utile en test). */
+    /** Nombre total de messages en cache (pour les logs/diagnostic). */
+    fun totalMessages(): Int = synchronized(threads) { threads.values.sumOf { it.messages.size } }
+
+    // ---- persistance ------------------------------------------------------
+
+    private fun storeFile(): File? {
+        val ctx = appContext ?: return null
+        return File(ctx.filesDir, STORE_FILE)
+    }
+
+    private fun persist() {
+        val file = storeFile() ?: return
+        try {
+            file.writeText(snapshot().toString())
+        } catch (e: Exception) {
+            Log.w(TAG, "persist échoué: ${e.message}")
+        }
+    }
+
+    private fun loadFromDisk() {
+        val file = storeFile() ?: return
+        if (!file.exists()) return
+        try {
+            val root = JSONObject(file.readText())
+            val convos = root.optJSONArray("conversations") ?: return
+            for (i in 0 until convos.length()) {
+                val c = convos.optJSONObject(i) ?: continue
+                val key = c.optString("id")
+                val contact = c.optString("contact_name")
+                val msgs = c.optJSONArray("messages") ?: continue
+                for (j in 0 until msgs.length()) {
+                    val m = msgs.optJSONObject(j) ?: continue
+                    addInternal(
+                        conversationKey = key,
+                        contactName = contact,
+                        body = m.optString("body"),
+                        timestamp = m.optLong("timestamp"),
+                        outgoing = m.optBoolean("outgoing"),
+                        sender = m.optString("sender"),
+                    )
+                }
+            }
+            Log.i(TAG, "cache RCS chargé: ${totalMessages()} messages")
+        } catch (e: Exception) {
+            Log.w(TAG, "load échoué: ${e.message}")
+        }
+    }
+
     fun clear() {
         synchronized(threads) { threads.clear() }
+        persist()
     }
 }

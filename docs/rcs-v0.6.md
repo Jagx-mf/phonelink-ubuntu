@@ -5,7 +5,7 @@ PhoneLink Ubuntu lit les SMS/MMS via le provider `Telephony` (cf.
 « Google Messages ») **n'y figurent pas**. La V0.6 ajoute leur capture via l'API
 officielle d'**accès aux notifications**, comme le fait KDE Connect.
 
-> V0.6.0 = **lecture seule + affichage fusionné** dans GTK. L'envoi RCV via
+> V0.6.0 = **lecture seule + affichage fusionné** dans GTK. L'envoi RCS via
 > `RemoteInput` est repoussé à **V0.6.1**.
 
 ---
@@ -38,9 +38,13 @@ SMS. Mécanisme exact (vérifié) :
 1. `NotificationReceiver extends NotificationListenerService` ; reçoit
    `onNotificationPosted()`. Permission spéciale « accès aux notifications »
    (réglage système `enabled_notification_listeners`), pas une permission runtime.
+   À chaque demande côté desktop, le plugin Notifications relit aussi les
+   notifications actives via `getActiveNotifications()` ; cela permet de voir
+   les notifications déjà présentes, pas seulement les nouvelles notifications.
 2. Extraction du contenu via
    `NotificationCompat.MessagingStyle.extractMessagingStyleFromNotification()`
-   (liste de messages : expéditeur + texte + horodatage), avec repli sur
+   (liste complète des messages exposés par la notification : expéditeur +
+   texte + horodatage), avec repli sur
    `EXTRA_BIG_TEXT` / `EXTRA_TEXT` / `EXTRA_TITLE`, puis `tickerText`.
 3. Réponse via `RemoteInput` : `RepliableNotification` stocke
    `pendingIntent` + `remoteInputs: List<RemoteInput>` + `packageName` ;
@@ -58,23 +62,46 @@ Google**, **aucun contournement de protection**. Distribution sideload assumée
 
 ```
 Google Messages RCS → notification Android → RcsNotificationListener
-→ RcsMessageStore (mémoire) → GET /v1/rcs/messages → android_bridge (Python)
+→ RcsMessageStore (mémoire + JSON local) → GET /v1/rcs/messages
+→ android_bridge (Python)
 → AndroidCompanionBackend (fusion SMS + RCS) → GTK (affichage unifié, badge RCS)
 ```
 
+Depuis le correctif V0.6.0 RC :
+
+- `GET /v1/rcs/messages` appelle d'abord
+  `RcsNotificationListener.instance?.refreshFromActive()`, donc PhoneLink relit
+  les notifications Google Messages actives à chaque appel API, comme KDE
+  Connect.
+- `RcsNotificationListener` extrait tous les messages `MessagingStyle` exposés
+  par la notification, avec un fallback sur `Notification.EXTRA_MESSAGES`, puis
+  sur `EXTRA_BIG_TEXT` / `EXTRA_TEXT` pour les notifications non structurées.
+- `RcsMessageStore` est un cache accumulateur persistant : il déduplique par fil
+  (`timestamp|body`), garde au plus 500 messages par conversation et écrit un
+  JSON local dans `filesDir/rcs_store.json`. Les messages déjà vus restent donc
+  visibles même si la notification Android disparaît.
+- `GET /v1/debug/notifications` (token requis) expose un dump JSON des
+  notifications actives Google Messages : clé système, titre, texte, shortcut,
+  catégorie, nombre de messages `MessagingStyle`, nombre de messages
+  `EXTRA_MESSAGES` et contenu extrait. Si le listener n'est pas connecté,
+  l'endpoint renvoie `status=listener_not_connected`.
+
 ## 4. Limites connues (V0.6.0)
 
-- **Seuls les messages notifiés sont visibles** : entrants ayant généré une
-  notification. **Pas d'historique RCS complet**, pas de backfill. Effacé une
-  fois la notif écartée/lue sur le téléphone (on garde un cache mémoire le temps
-  de la session du service).
+- **Seuls les messages exposés par les notifications sont visibles** : entrants
+  ayant généré une notification et petite fenêtre récente portée par
+  `MessagingStyle`. **Pas d'historique RCS complet**, pas de backfill depuis une
+  base privée Google Messages.
 - **RCS sortants** (envoyés depuis le téléphone) ne sont pas notifiés → absents.
 - MessagingStyle ne fournit qu'une **petite fenêtre récente** de messages.
 - **Pas d'ID fiable** → déduplication heuristique (horodatage + texte).
 - **Appariement conversation** heuristique (titre/expéditeur, pas de `thread_id`).
   En V0.6.0 les fils RCS sont une **liste à part** (id préfixé `rcs:`), affichés
   avec un badge, pas fusionnés au thread SMS du même contact.
-- **Cache volatil** : perdu si le service est tué (pas de persistance en V0.6.0).
+- **Cache local non canonique** : il améliore l'affichage PhoneLink, mais ne
+  remplace pas l'historique réel Google Messages et peut contenir des doublons
+  si Google émet des notifications avec horodatages différents pour le même
+  texte.
 - **Pas d'envoi** en V0.6.0 (RemoteInput → V0.6.1).
 
 ## 5. Sources
