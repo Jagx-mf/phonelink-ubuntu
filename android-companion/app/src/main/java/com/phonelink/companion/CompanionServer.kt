@@ -1,5 +1,6 @@
 package com.phonelink.companion
 
+import android.content.Context
 import fi.iki.elonen.NanoHTTPD
 import org.json.JSONObject
 
@@ -9,9 +10,14 @@ import org.json.JSONObject
  * Endpoints (préfixe `/v1`) :
  *  - `GET  /health`        public
  *  - `POST /pair`          PIN → token
- *  - `GET  /conversations` token requis (démo)
- *  - `GET  /messages`      token requis (démo)
- *  - `POST /send`          token requis (n'envoie aucun vrai SMS)
+ *  - `GET  /conversations` token requis
+ *  - `GET  /messages`      token requis
+ *  - `POST /send`          token requis (envoi réel via SmsManager)
+ *
+ * V0.5 — SMS réels : si les permissions SMS sont accordées, les endpoints
+ * lisent/écrivent les vrais SMS via [SmsRepository]. Sinon ils retombent sur
+ * [DemoData] (fallback de démo, même format JSON). `/health` reflète honnêtement
+ * l'état (`sms_permission`).
  *
  * Réponses toujours en JSON. Le token est attendu dans l'en-tête
  * `Authorization: Bearer <token>`.
@@ -20,6 +26,8 @@ class CompanionServer(
     port: Int,
     private val pairing: PairingManager,
     private val deviceName: String,
+    private val context: Context,
+    private val appVersion: String,
 ) : NanoHTTPD(port) {
 
     override fun serve(session: IHTTPSession): Response {
@@ -37,11 +45,11 @@ class CompanionServer(
             method == Method.GET && uri == "/v1/health" -> health()
             method == Method.POST && uri == "/v1/pair" -> pair(session)
             method == Method.GET && uri == "/v1/conversations" ->
-                guarded(session) { json(Response.Status.OK, DemoData.conversations()) }
+                guarded(session) { conversations() }
             method == Method.GET && uri == "/v1/messages" ->
                 guarded(session) { messages(session) }
             method == Method.POST && uri == "/v1/send" ->
-                guarded(session) { send() }
+                guarded(session) { send(session) }
             else -> jsonError(Response.Status.NOT_FOUND, "not_found")
         }
     }
@@ -49,11 +57,19 @@ class CompanionServer(
     // ---- endpoints -------------------------------------------------------
 
     private fun health(): Response {
+        val smsPermission =
+            SmsRepository.hasReadSms(context) && SmsRepository.hasSendSms(context)
         val body = JSONObject()
-            .put("ok", true)
-            .put("device_name", deviceName)
-            .put("api_version", "v1")
+            // Champs du contrat (docs/android-backend-v0.4.md §6) consommés par
+            // app/core/android_bridge.py.
+            .put("status", "ok")
+            .put("app_version", appVersion)
+            .put("sms_permission", smsPermission)
+            .put("default_sms_app", SmsRepository.isDefaultSmsApp(context))
+            .put("device", deviceName)
+            // Champs historiques conservés pour rétro-compatibilité de l'app.
             .put("paired", pairing.isPaired)
+            .put("api_version", "v1")
         return json(Response.Status.OK, body)
     }
 
@@ -67,16 +83,69 @@ class CompanionServer(
         }
     }
 
-    private fun messages(session: IHTTPSession): Response {
-        val conversationId = session.parameters["conversation_id"]?.firstOrNull() ?: "demo-1"
-        return json(Response.Status.OK, DemoData.messages(conversationId))
+    private fun conversations(): Response {
+        val data = if (SmsRepository.hasReadSms(context)) {
+            SmsRepository.conversations(context)
+        } else {
+            DemoData.conversations()
+        }
+        return json(Response.Status.OK, data)
     }
 
-    private fun send(): Response {
-        val body = JSONObject()
-            .put("sent", false)
-            .put("detail", "SMS réel non implémenté dans cette version")
-        return json(Response.Status.OK, body)
+    private fun messages(session: IHTTPSession): Response {
+        val conversationId =
+            session.parameters["conversation_id"]?.firstOrNull() ?: "demo-1"
+        val data = if (SmsRepository.hasReadSms(context)) {
+            SmsRepository.messages(context, conversationId)
+        } else {
+            DemoData.messages(conversationId)
+        }
+        return json(Response.Status.OK, data)
+    }
+
+    private fun send(session: IHTTPSession): Response {
+        if (!SmsRepository.hasSendSms(context)) {
+            return json(
+                Response.Status.SERVICE_UNAVAILABLE,
+                JSONObject()
+                    .put("sent", false)
+                    .put("error", "permission SEND_SMS manquante"),
+            )
+        }
+        val payload = readJsonBody(session)
+        val body = payload?.optString("body").orEmpty()
+        // Le client peut fournir phone_number (nouveau fil). Si seul
+        // conversation_id est fourni, on tente d'en déduire le numéro.
+        var phoneNumber = payload?.optString("phone_number").orEmpty()
+        val conversationId = payload?.optString("conversation_id").orEmpty()
+        if (phoneNumber.isBlank() && conversationId.isNotBlank()) {
+            phoneNumber = phoneNumberForThread(conversationId)
+        }
+
+        val outcome = SmsRepository.send(context, phoneNumber, body)
+        val result = JSONObject().put("sent", outcome.sent)
+        outcome.error?.let { result.put("error", it) }
+        outcome.echo?.let { result.put("message", it) }
+        val status = if (outcome.sent) {
+            Response.Status.OK
+        } else {
+            Response.Status.BAD_REQUEST
+        }
+        return json(status, result)
+    }
+
+    /** Numéro associé à un thread, lu depuis le résumé des conversations. */
+    private fun phoneNumberForThread(conversationId: String): String {
+        if (!SmsRepository.hasReadSms(context)) return ""
+        val convos = SmsRepository.conversations(context)
+            .optJSONArray("conversations") ?: return ""
+        for (i in 0 until convos.length()) {
+            val c = convos.optJSONObject(i) ?: continue
+            if (c.optString("id") == conversationId) {
+                return c.optString("phone_number")
+            }
+        }
+        return ""
     }
 
     // ---- sécurité --------------------------------------------------------
@@ -106,7 +175,7 @@ class CompanionServer(
         }
     }
 
-    private fun json(status: Response.Status, obj: JSONObject): Response =
+    private fun json(status: Response.IStatus, obj: JSONObject): Response =
         newFixedLengthResponse(status, "application/json", obj.toString())
 
     private fun jsonError(status: Response.Status, code: String): Response =

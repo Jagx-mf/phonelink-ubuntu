@@ -51,6 +51,11 @@ ENV_BASE_URL = "PHONELINK_BRIDGE_URL"
 #: Variable d'environnement pour le token Bearer.
 ENV_TOKEN = "PHONELINK_BRIDGE_TOKEN"
 
+#: Variable d'environnement pour autoriser l'envoi réel de SMS (V0.5, opt-in).
+#: Vaut faux par défaut : le garde-fou ``allow_real_send`` reste actif tant que
+#: cette variable n'est pas explicitement positionnée à ``1``/``true``/``yes``.
+ENV_ALLOW_SEND = "PHONELINK_BRIDGE_ALLOW_SEND"
+
 
 class BridgeMode(str, Enum):
     """Mode de fonctionnement du pont."""
@@ -498,8 +503,9 @@ def _bridge_from_env() -> AndroidBridge:
     - ``PHONELINK_BRIDGE_URL``  : base URL si mode http (défaut DEFAULT_BASE_URL)
     - ``PHONELINK_BRIDGE_TOKEN``: token Bearer optionnel
 
-    L'envoi réel reste désactivé (``allow_real_send=False``) : il ne s'active pas
-    par l'environnement, seulement par construction explicite.
+    L'envoi réel reste **désactivé par défaut**. Depuis la V0.5, il peut être
+    activé explicitement via ``PHONELINK_BRIDGE_ALLOW_SEND=1`` (opt-in clair),
+    pour tester l'envoi vers l'app compagnon réelle.
     """
     mode_key = os.environ.get(ENV_MODE, "mock").strip().lower()
     mode = BridgeMode.HTTP if mode_key == "http" else BridgeMode.MOCK
@@ -507,7 +513,13 @@ def _bridge_from_env() -> AndroidBridge:
         base_url=os.environ.get(ENV_BASE_URL, DEFAULT_BASE_URL),
         token=os.environ.get(ENV_TOKEN) or None,
         mode=mode,
+        allow_real_send=_env_flag(ENV_ALLOW_SEND),
     )
+
+
+def _env_flag(name: str) -> bool:
+    """True si la variable d'environnement ``name`` vaut 1/true/yes/on."""
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def get_bridge() -> AndroidBridge:

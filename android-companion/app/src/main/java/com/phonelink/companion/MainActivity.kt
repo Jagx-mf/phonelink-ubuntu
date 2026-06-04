@@ -1,24 +1,42 @@
 package com.phonelink.companion
 
+import android.Manifest
 import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import com.phonelink.companion.databinding.ActivityMainBinding
 import java.net.Inet4Address
 import java.net.NetworkInterface
 
 /**
- * Écran unique : démarrer/arrêter le serveur, afficher IP/port/PIN.
+ * Écran unique : démarrer/arrêter le serveur, afficher IP/port/PIN, gérer les
+ * permissions SMS.
  *
  * Le serveur est lié au cycle de vie de l'activité (démo) : il s'arrête quand
  * l'activité est détruite. Un service de premier plan viendra plus tard.
+ *
+ * V0.5 : les permissions SMS (dangereuses) sont demandées à l'exécution. Sans
+ * elles, le serveur fonctionne toujours mais sert les données de démo
+ * ([DemoData]) et `/v1/health` renvoie `sms_permission=false`.
  */
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
     private val pairing = PairingManager()
     private var server: CompanionServer? = null
+
+    private val permissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+            render()
+            val granted = SmsRepository.hasReadSms(this) && SmsRepository.hasSendSms(this)
+            toast(
+                getString(
+                    if (granted) R.string.sms_granted else R.string.sms_denied
+                )
+            )
+        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -32,13 +50,20 @@ class MainActivity : AppCompatActivity() {
             render()
             toast(getString(R.string.pin_regenerated))
         }
+        binding.btnRequestSms.setOnClickListener { requestSmsPermissions() }
 
         render()
     }
 
     private fun startServer() {
         if (server != null) return
-        val instance = CompanionServer(PORT, pairing, deviceName())
+        val instance = CompanionServer(
+            PORT,
+            pairing,
+            deviceName(),
+            applicationContext,
+            appVersion(),
+        )
         try {
             instance.start(NanoHttpdTimeout, false)
             server = instance
@@ -54,9 +79,24 @@ class MainActivity : AppCompatActivity() {
         render()
     }
 
+    override fun onResume() {
+        super.onResume()
+        render() // refléter une éventuelle révocation de permission depuis les réglages
+    }
+
     override fun onDestroy() {
         stopServer()
         super.onDestroy()
+    }
+
+    private fun requestSmsPermissions() {
+        val permissions = mutableListOf(
+            Manifest.permission.READ_SMS,
+            Manifest.permission.SEND_SMS,
+            Manifest.permission.RECEIVE_SMS,
+            Manifest.permission.READ_CONTACTS,
+        )
+        permissionLauncher.launch(permissions.toTypedArray())
     }
 
     private fun render() {
@@ -70,6 +110,13 @@ class MainActivity : AppCompatActivity() {
         binding.txtPaired.text = getString(
             if (pairing.isPaired) R.string.paired_yes else R.string.paired_no
         )
+
+        val smsOk = SmsRepository.hasReadSms(this) && SmsRepository.hasSendSms(this)
+        binding.txtSms.text = getString(
+            if (smsOk) R.string.sms_mode_real else R.string.sms_mode_demo
+        )
+        binding.btnRequestSms.isEnabled = !smsOk
+
         binding.btnStart.isEnabled = !running
         binding.btnStop.isEnabled = running
     }
@@ -79,6 +126,13 @@ class MainActivity : AppCompatActivity() {
             .filter { it.isNotBlank() }
             .joinToString(" ")
             .ifBlank { "Android" }
+
+    private fun appVersion(): String =
+        try {
+            packageManager.getPackageInfo(packageName, 0).versionName ?: ""
+        } catch (e: Exception) {
+            ""
+        }
 
     /** Première adresse IPv4 non-loopback (Wi-Fi/LAN), ou null. */
     private fun localIpAddress(): String? {

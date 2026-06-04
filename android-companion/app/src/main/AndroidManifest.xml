@@ -5,10 +5,18 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
     <!--
-      AUCUNE permission SMS demandée dans cette V0.4.1 (READ_SMS / SEND_SMS
-      seront ajoutées quand les vrais SMS seront implémentés).
+      V0.5 — SMS réels. Permissions dangereuses (Android 6+) : demande runtime
+      explicite dans MainActivity, révocables à tout moment. Si elles sont
+      refusées, le serveur retombe sur les données de démo (DemoData) et
+      /v1/health renvoie sms_permission=false. READ_CONTACTS est optionnelle :
+      sert uniquement à résoudre numéro → nom de contact.
     -->
+    <uses-permission android:name="android.permission.READ_SMS" />
+    <uses-permission android:name="android.permission.SEND_SMS" />
+    <uses-permission android:name="android.permission.RECEIVE_SMS" />
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
 
     <application
         android:allowBackup="false"

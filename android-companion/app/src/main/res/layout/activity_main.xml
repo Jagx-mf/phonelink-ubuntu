@@ -100,7 +100,28 @@
             android:layout_height="wrap_content"
             android:text="—" />
 
+        <!-- Mode SMS (réel / démo) -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="@string/label_sms_mode"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/txtSms"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="—" />
+
         <!-- Boutons -->
+        <Button
+            android:id="@+id/btnRequestSms"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:text="@string/btn_request_sms" />
+
         <Button
             android:id="@+id/btnStart"
             android:layout_width="match_parent"

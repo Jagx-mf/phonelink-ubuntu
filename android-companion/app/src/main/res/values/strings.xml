@@ -1,13 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">PhoneLink Companion</string>
-    <string name="demo_notice">Démo locale — aucun accès SMS réel dans cette version.</string>
+    <string name="demo_notice">SMS réels via permissions Android, sinon données de démo.</string>
 
     <string name="label_status">Statut du serveur</string>
     <string name="label_ip">Adresse IP locale</string>
     <string name="label_port">Port</string>
     <string name="label_pin">PIN d\'appairage</string>
     <string name="label_paired">Appairé</string>
+    <string name="label_sms_mode">Mode SMS</string>
 
     <string name="status_running">Démarré</string>
     <string name="status_stopped">Arrêté</string>
@@ -15,10 +16,16 @@
     <string name="paired_yes">Oui</string>
     <string name="paired_no">Non</string>
 
+    <string name="sms_mode_real">SMS réels (permissions accordées)</string>
+    <string name="sms_mode_demo">Démo (permissions SMS manquantes)</string>
+
     <string name="btn_start">Démarrer le serveur</string>
     <string name="btn_stop">Arrêter le serveur</string>
     <string name="btn_regenerate_pin">Nouveau PIN</string>
+    <string name="btn_request_sms">Autoriser l\'accès aux SMS</string>
 
     <string name="pin_regenerated">Nouveau PIN généré</string>
     <string name="start_error">Erreur au démarrage : %1$s</string>
+    <string name="sms_granted">Permissions SMS accordées — SMS réels actifs</string>
+    <string name="sms_denied">Permissions refusées — mode démo conservé</string>
 </resources>

@@ -4,10 +4,14 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * Données fictives renvoyées par `/v1/conversations` et `/v1/messages`.
+ * Données fictives renvoyées par `/v1/conversations` et `/v1/messages` lorsque
+ * les permissions SMS ne sont pas accordées (fallback de démo).
  *
- * Aucun accès SMS réel en V0.4.1 — ces objets servent uniquement à valider le
- * transport et le contrat JSON avec le client Ubuntu.
+ * Le format JSON est **strictement aligné sur le contrat** (cf.
+ * docs/android-backend-v0.4.md §2) et sur ce que renvoie [SmsRepository] :
+ * `contact_name` (pas `title`), `last_timestamp` (pas `timestamp`), `unread`
+ * entier. Ainsi le client Ubuntu se comporte de façon identique en démo et en
+ * réel.
  */
 object DemoData {
 
@@ -16,23 +20,23 @@ object DemoData {
     fun conversations(): JSONObject {
         val conversation = JSONObject()
             .put("id", "demo-1")
-            .put("title", "Maman")
+            .put("contact_name", "Maman")
             .put("phone_number", "+33000000000")
             .put("last_message", "Message de test")
-            .put("timestamp", DEMO_TS)
-            .put("unread", false)
+            .put("last_timestamp", DEMO_TS)
+            .put("unread", 0)
 
         return JSONObject().put("conversations", JSONArray().put(conversation))
     }
 
     fun messages(conversationId: String): JSONObject {
         val message = JSONObject()
-            .put("id", "msg-1")
-            .put("conversation_id", conversationId)
             .put("body", "Salut depuis Android Companion")
             .put("timestamp", DEMO_TS)
             .put("outgoing", false)
 
-        return JSONObject().put("messages", JSONArray().put(message))
+        return JSONObject()
+            .put("conversation_id", conversationId)
+            .put("messages", JSONArray().put(message))
     }
 }

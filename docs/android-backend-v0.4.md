@@ -277,9 +277,9 @@ Côté **Ubuntu** (ce dépôt) :
    `pair_and_save()` — seule étape UI restante.
 8. ⬜ Mise en place du port-forward ADB depuis `app/core/adb.py`.
 
-Côté **Android** (futur dépôt/app compagnon) :
-9. ⬜ Service de premier plan + serveur HTTP local.
-10. ⬜ Lecture SMS via `ContentResolver` (`Telephony.Sms.CONVERSATIONS` / `Inbox`).
-11. ⬜ Envoi via `SmsManager` + persistance dans `Telephony.Sms`.
-12. ⬜ Écran d'appairage (PIN), gestion du token, révocation.
-13. ⬜ Gestion des permissions runtime et état dégradé (`/health` honnête).
+Côté **Android** (`android-companion/`) — **V0.5, cf. [`android-backend-v0.5.md`](android-backend-v0.5.md)** :
+9. ⬜ Service de premier plan (serveur encore lié à l'activité).
+10. ✅ Lecture SMS via `ContentResolver` (`Telephony.Sms`) → `SmsRepository`.
+11. 🟡 Envoi via `SmsManager` ✅ ; persistance dans `Telephony.Sms` ⬜ (exige app SMS par défaut).
+12. 🟡 Appairage PIN/token déjà présent (V0.4) ; révocation persistante ⬜.
+13. ✅ Permissions runtime + état dégradé honnête (`/health.sms_permission`, fallback démo).
