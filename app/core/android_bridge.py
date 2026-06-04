@@ -164,8 +164,12 @@ class AndroidBridge:
                 sms_permission=False,
                 detail="Mode démo — aucune app compagnon Android connectée",
             )
-        data = self._request("GET", "/health")
-        return HealthStatus(
+        try:
+            data = self._request("GET", "/health")
+        except BridgeError as exc:
+            logger.warning("android_bridge: health KO — %s", exc)
+            raise
+        status = HealthStatus(
             reachable=True,
             sms_permission=bool(data.get("sms_permission", False)),
             default_sms_app=bool(data.get("default_sms_app", False)),
@@ -173,6 +177,11 @@ class AndroidBridge:
             device=str(data.get("device", "")),
             detail="Connecté",
         )
+        logger.info(
+            "android_bridge: health OK — device=%r version=%s sms_permission=%s",
+            status.device, status.app_version, status.sms_permission,
+        )
+        return status
 
     def list_conversations(self) -> list[BridgeConversation]:
         """Lister les conversations (``GET /conversations``)."""
@@ -496,39 +505,90 @@ class _MockData:
 _bridge: Optional[AndroidBridge] = None
 
 
-def _bridge_from_env() -> AndroidBridge:
-    """Construire un pont d'après l'environnement (mock par défaut).
-
-    - ``PHONELINK_BRIDGE_MODE`` : ``mock`` (défaut) | ``http``
-    - ``PHONELINK_BRIDGE_URL``  : base URL si mode http (défaut DEFAULT_BASE_URL)
-    - ``PHONELINK_BRIDGE_TOKEN``: token Bearer optionnel
-
-    L'envoi réel reste **désactivé par défaut**. Depuis la V0.5, il peut être
-    activé explicitement via ``PHONELINK_BRIDGE_ALLOW_SEND=1`` (opt-in clair),
-    pour tester l'envoi vers l'app compagnon réelle.
-    """
-    mode_key = os.environ.get(ENV_MODE, "mock").strip().lower()
-    mode = BridgeMode.HTTP if mode_key == "http" else BridgeMode.MOCK
-    return AndroidBridge(
-        base_url=os.environ.get(ENV_BASE_URL, DEFAULT_BASE_URL),
-        token=os.environ.get(ENV_TOKEN) or None,
-        mode=mode,
-        allow_real_send=_env_flag(ENV_ALLOW_SEND),
-    )
-
-
 def _env_flag(name: str) -> bool:
     """True si la variable d'environnement ``name`` vaut 1/true/yes/on."""
     return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
 
 
+def _build_bridge() -> AndroidBridge:
+    """Construire le pont en fusionnant **env > config persistée > défaut**.
+
+    Priorité (la plus forte d'abord) :
+
+    1. variables d'environnement explicites (``PHONELINK_BRIDGE_*``) ;
+    2. configuration persistée (``app/core/config.py``) ;
+    3. valeurs par défaut (mode mock, envoi réel désactivé).
+
+    Ainsi un utilisateur final qui s'est appairé (mode ``http`` + token en
+    config) obtient automatiquement le pont HTTP au lancement, sans variable
+    d'environnement ; le développeur peut toujours surcharger via l'env.
+    """
+    from app.core import config  # import local : pas de couplage au chargement
+
+    try:
+        cfg = config.load_config()
+    except Exception as exc:  # config illisible : on continue sur l'env/défauts
+        logger.warning("android_bridge: config illisible (%s) — défauts", exc)
+        cfg = None
+
+    # mode : env > config > mock
+    env_mode = os.environ.get(ENV_MODE)
+    if env_mode is not None:
+        mode = BridgeMode.HTTP if env_mode.strip().lower() == "http" else BridgeMode.MOCK
+        mode_src = "env"
+    elif cfg is not None and cfg.android_bridge_mode == "http":
+        mode = BridgeMode.HTTP
+        mode_src = "config"
+    else:
+        mode = BridgeMode.MOCK
+        mode_src = "config" if cfg is not None else "défaut"
+
+    base_url = (
+        os.environ.get(ENV_BASE_URL)
+        or (cfg.android_bridge_base_url if cfg else "")
+        or DEFAULT_BASE_URL
+    )
+    token = (
+        os.environ.get(ENV_TOKEN)
+        or (cfg.android_bridge_token if cfg else "")
+        or None
+    )
+
+    # allow_real_send : env (si défini) > config > False
+    if os.environ.get(ENV_ALLOW_SEND) is not None:
+        allow_send = _env_flag(ENV_ALLOW_SEND)
+    else:
+        allow_send = bool(cfg.android_allow_send) if cfg else False
+
+    logger.info(
+        "android_bridge: mode=%s (%s), url=%s, token=%s, envoi_réel=%s",
+        mode.value, mode_src, base_url,
+        "présent" if token else "absent",
+        "autorisé" if allow_send else "bloqué",
+    )
+    return AndroidBridge(
+        base_url=base_url, token=token, mode=mode, allow_real_send=allow_send,
+    )
+
+
 def get_bridge() -> AndroidBridge:
-    """Retourner le pont actif (singleton paresseux, configuré par l'env)."""
+    """Retourner le pont actif (singleton paresseux, env > config > défaut)."""
     global _bridge
     if _bridge is None:
-        _bridge = _bridge_from_env()
-        logger.info("android_bridge: pont actif en mode %s", _bridge.mode.value)
+        _bridge = _build_bridge()
     return _bridge
+
+
+def set_allow_real_send(value: bool) -> None:
+    """Active/désactive l'envoi réel sur le pont actif (action UI explicite).
+
+    Utilisé par la confirmation d'envoi de l'UI : le garde-fou reste fermé tant
+    que l'utilisateur n'a pas confirmé. N'affecte que la session courante (rien
+    n'est persisté ici).
+    """
+    bridge = get_bridge()
+    bridge.allow_real_send = value
+    logger.info("android_bridge: envoi réel %s (action UI)", "activé" if value else "désactivé")
 
 
 def set_bridge(bridge: Optional[AndroidBridge]) -> None:

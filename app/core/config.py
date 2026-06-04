@@ -27,6 +27,9 @@ class PhoneLinkConfig:
     android_bridge_base_url: str = DEFAULT_ANDROID_BRIDGE_URL
     android_bridge_token: str = ""
     android_bridge_mode: str = "mock"  # "mock" | "http"
+    # Autorise l'envoi de VRAIS SMS (garde-fou). Faux par défaut : l'utilisateur
+    # doit l'activer explicitement. Cf. docs/android-backend-v0.5.md §envoi.
+    android_allow_send: bool = False
 
 
 def get_config_path() -> Path:
@@ -58,6 +61,7 @@ def load_config() -> PhoneLinkConfig:
         or DEFAULT_ANDROID_BRIDGE_URL,
         android_bridge_token=_as_str(data.get("android_bridge_token")),
         android_bridge_mode=_as_bridge_mode(data.get("android_bridge_mode")),
+        android_allow_send=_as_bool(data.get("android_allow_send")),
     )
 
 
@@ -76,6 +80,7 @@ def save_config(config: PhoneLinkConfig | dict[str, Any]) -> None:
             or DEFAULT_ANDROID_BRIDGE_URL,
             "android_bridge_token": _as_str(config.get("android_bridge_token")),
             "android_bridge_mode": _as_bridge_mode(config.get("android_bridge_mode")),
+            "android_allow_send": _as_bool(config.get("android_allow_send")),
         }
 
     try:
@@ -92,6 +97,15 @@ def save_config(config: PhoneLinkConfig | dict[str, Any]) -> None:
 
 def _as_str(value: Any) -> str:
     return value if isinstance(value, str) else ""
+
+
+def _as_bool(value: Any) -> bool:
+    """Coerce a value into a bool, accepting JSON bools and a few strings."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return False
 
 
 def _as_bridge_mode(value: Any) -> str:

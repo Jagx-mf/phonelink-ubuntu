@@ -287,27 +287,59 @@ _backend: Optional[SmsBackend] = None
 def get_backend() -> SmsBackend:
     """Return the active SMS backend (lazily created singleton).
 
-    Selection order:
+    Selection order (highest priority first):
 
     1. an explicit backend set via :func:`set_backend`;
-    2. otherwise the key in ``$PHONELINK_SMS_BACKEND`` (``mock`` | ``android``);
-    3. otherwise the mock.
+    2. the key in ``$PHONELINK_SMS_BACKEND`` (``mock`` | ``android``) — dev override;
+    3. the persisted config: ``android`` if ``android_bridge_mode == "http"`` and a
+       token is present (so a paired user gets real SMS automatically);
+    4. otherwise the mock (demo fallback).
 
     The UI never has to change: it always talks to :class:`SmsBackend`.
     """
     global _backend
     if _backend is None:
-        key = os.environ.get(_ENV_KEY, "mock").strip().lower()
+        _backend = _select_backend()
+    return _backend
+
+
+def _select_backend() -> SmsBackend:
+    """Resolve the backend per the documented priority, logging the reason."""
+    # 1/2. Override explicite par l'environnement (développeur).
+    env_key = os.environ.get(_ENV_KEY)
+    if env_key:
+        key = env_key.strip().lower()
         factory = _BACKENDS.get(key)
         if factory is None:
             logger.warning(
-                "%s=%r inconnu — retour au backend mock (valeurs: %s)",
+                "%s=%r inconnu — retour au mock (valeurs: %s)",
                 _ENV_KEY, key, ", ".join(_BACKENDS),
             )
             factory = MockSmsBackend
-        _backend = factory()
-        logger.info("Backend SMS actif: %s", _backend.name)
-    return _backend
+        backend = factory()
+        logger.info("Backend SMS (override env %s=%s): %s", _ENV_KEY, key, backend.name)
+        return backend
+
+    # 3. Config persistée : appairé (http + token) → backend Android.
+    reason = "config absente"
+    try:
+        from app.core import config
+        cfg = config.load_config()
+        if cfg.android_bridge_mode == "http" and cfg.android_bridge_token:
+            backend = AndroidCompanionBackend()
+            logger.info("Backend SMS (config: appairé http+token): %s", backend.name)
+            return backend
+        reason = (
+            "mode config != http" if cfg.android_bridge_mode != "http"
+            else "token d'appairage absent"
+        )
+    except Exception as exc:  # config illisible : on retombe proprement sur le mock
+        reason = f"config illisible: {exc}"
+
+    # 4. Fallback démo.
+    backend = MockSmsBackend()
+    logger.info("Backend SMS mock (fallback démo — raison: %s)", reason)
+    return backend
 
 
 def set_backend(backend: Optional[SmsBackend]) -> None:

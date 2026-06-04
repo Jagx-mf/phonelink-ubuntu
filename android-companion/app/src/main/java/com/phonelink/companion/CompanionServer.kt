@@ -95,8 +95,10 @@ class CompanionServer(
     private fun messages(session: IHTTPSession): Response {
         val conversationId =
             session.parameters["conversation_id"]?.firstOrNull() ?: "demo-1"
+        val limit = session.parameters["limit"]?.firstOrNull()?.toIntOrNull()
+            ?: SmsRepository.DEFAULT_MESSAGE_LIMIT
         val data = if (SmsRepository.hasReadSms(context)) {
-            SmsRepository.messages(context, conversationId)
+            SmsRepository.messages(context, conversationId, limit)
         } else {
             DemoData.messages(conversationId)
         }

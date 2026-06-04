@@ -4,9 +4,9 @@ Suite de [`android-backend-v0.4.md`](android-backend-v0.4.md). La V0.4 préparai
 le terrain (transport HTTP, appairage, mock). La **V0.5 implémente l'accès SMS
 réel côté Android** tout en conservant le mock comme fallback.
 
-> Statut : code écrit, **non encore validé sur appareil réel** (compilation et
-> tests ADB à lancer côté utilisateur — aucun SDK Android dans l'environnement de
-> dev de ce dépôt). Voir « Tests » plus bas.
+> Statut : **validé sur appareil réel** (lecture conversations/messages OK via
+> l'app compagnon). Les raffinements UX/backend ci-dessous (§9) sont issus de
+> cette validation terrain.
 
 ---
 
@@ -157,5 +157,74 @@ PHONELINK_BRIDGE_MODE=http PHONELINK_BRIDGE_TOKEN=$TOKEN \
 - Devenir app SMS par défaut (optionnel) → persistance des envois dans le fil.
 - `RECEIVE_SMS` : notification/rafraîchissement temps réel des entrants.
 - Service de premier plan pour garder le serveur vivant.
-- UI d'appairage GTK (champ PIN) branchée sur `pair_and_save()`.
 - Port-forward ADB automatique depuis `app/core/adb.py`.
+
+---
+
+## 9. Raffinements UX/backend (post-validation terrain)
+
+Issus de l'usage réel. Tout reste compatible V0.4 (mock par défaut, Bluetooth/
+photos/galerie intacts).
+
+### 9.1 Sélection de backend automatique (plus de variables d'env obligatoires)
+
+`sms.get_backend()` et `android_bridge.get_bridge()` résolvent désormais leur
+configuration par **priorité décroissante** :
+
+1. **variables d'environnement** explicites (override développeur) ;
+2. **config persistée** (`~/.config/phonelink-ubuntu/config.json`) : si
+   `android_bridge_mode == "http"` **et** un token est présent → backend Android ;
+3. **fallback mock/démo**.
+
+Concrètement : après un appairage, `python3 main.py` **suffit** — plus besoin de
+`PHONELINK_SMS_BACKEND=android …`. Logs émis : backend choisi, mode + source,
+URL, token présent/absent, `health` OK/KO, **raison** du fallback démo.
+
+### 9.2 Envoi de vrais SMS depuis GTK, sans variable d'env, avec garde-fou
+
+- Le bouton **Envoyer** déclenche, sur backend Android, une **boîte de
+  confirmation** « Envoyer un vrai SMS ? » (nom du contact, avertissement coût).
+- La confirmation = autorisation explicite : elle lève le garde-fou
+  `allow_real_send` **pour la session** (`android_bridge.set_allow_real_send`).
+- Garde-fou persistant complémentaire : `config.android_allow_send` (défaut
+  `False`) et l'override `PHONELINK_BRIDGE_ALLOW_SEND=1`.
+- En mode démo, l'envoi reste simulé (aucune confirmation, rien n'est transmis).
+- **Aucun SMS réel n'est envoyé sans clic explicite** sur « Envoyer » dans le
+  dialog → sûr pendant les tests.
+
+### 9.3 `/v1/messages` renvoie les N **derniers** messages
+
+`SmsRepository.messages()` interroge `DATE DESC LIMIT N` puis **inverse** vers
+ancien→récent (défaut `N=200`, paramètre `?limit=`). On obtient donc les messages
+les plus récents (et non les plus anciens) sur les longs fils.
+
+### 9.4 Cache + chargement non bloquant (latence au changement de conversation)
+
+- Côté GTK : cache des messages **par `conversation_id`** → réouverture instantanée.
+- Premier chargement (ou **Rafraîchir**) effectué dans un **thread**, l'UI affiche
+  « Chargement… » et ne se fige pas ; résultat appliqué via `GLib.idle_add`.
+- Un **compteur de génération** ignore un résultat obsolète si l'utilisateur a
+  changé de conversation entre-temps.
+- Bouton **Rafraîchir** (icône) dans la barre de titre : invalide le cache de la
+  conversation courante et recharge. Log du **temps de chargement** (ms).
+
+### 9.5 Scroll automatique en bas
+
+À l'ouverture d'une conversation, on vise le **dernier message**. Le scroll est
+appliqué via le signal `changed` de l'ajustement vertical (donc **après** la mise
+en page des bulles), pas immédiatement après l'ajout des widgets.
+
+### 9.6 UI d'appairage PIN
+
+Bouton « cadenas » dans la barre de titre → petite fenêtre modale (champ PIN +
+**Appairer**). Appelle `pair_and_save(pin)` dans un thread, persiste le token,
+**bascule** le backend vers Android et **recharge** la liste des conversations,
+sans relancer l'application.
+
+### Fichiers touchés (9.x)
+
+`app/core/config.py` (champ `android_allow_send`), `app/core/android_bridge.py`
+(`_build_bridge` env>config>défaut, `set_allow_real_send`, logs health),
+`app/core/sms.py` (`_select_backend`), `app/ui/sms_window.py` (cache, thread,
+scroll, confirmation, appairage), `android-companion/.../SmsRepository.kt` +
+`CompanionServer.kt` (limite messages).

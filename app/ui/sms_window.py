@@ -1,20 +1,34 @@
-"""SMS panel for PhoneLink Ubuntu (mock data, no Android connection yet).
+"""SMS panel for PhoneLink Ubuntu.
 
 Layout: conversation list on the left, the selected thread on the right, and a
-compose row at the bottom. Sending is *simulated* — see ``app/core/sms.py`` and
-``docs/sms.md``. The window talks only to :class:`~app.core.sms.SmsBackend`, so
-swapping the mock for a real Android-companion backend changes nothing here.
+compose row at the bottom. The window talks only to
+:class:`~app.core.sms.SmsBackend`, so the mock and the real Android-companion
+backend are interchangeable.
+
+Behaviour highlights:
+
+* messages for a conversation are loaded **in a background thread** (the real
+  backend does HTTP) and **cached** per ``conversation_id`` so re-opening a
+  thread is instant; a "Rafraîchir" button forces a reload;
+* the thread auto-scrolls to the **latest** message once laid out;
+* sending a **real** SMS (Android backend) requires an explicit confirmation
+  dialog — no real SMS leaves the phone without the user clicking "Envoyer";
+* a "Appairer" button runs the PIN pairing flow and switches to the Android
+  backend without restarting the app.
 """
 
 from __future__ import annotations
 
+import threading
+import time
 from datetime import datetime
 
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Pango", "1.0")
-from gi.repository import Gtk, Gdk, Pango
+from gi.repository import Gtk, Gdk, Pango, GLib
 
+from app.core import android_bridge
 from app.core import sms as sms_core
 from app.utils.logger import get_logger
 
@@ -39,6 +53,15 @@ class SmsWindow(Gtk.Window):
 
         self._backend = sms_core.get_backend()
         self._current_id: str | None = None
+        # Cache des messages déjà chargés, par conversation_id → liste de Message.
+        # Évite de recharger depuis Android à chaque clic (P3).
+        self._cache: dict[str, list[sms_core.Message]] = {}
+        # Compteur de génération : un chargement async obsolète est ignoré si
+        # l'utilisateur a changé de conversation entre-temps.
+        self._load_seq = 0
+        # Scroll auto en bas : armé à chaque ouverture, consommé une fois le
+        # contenu réellement mis en page (cf. _on_thread_adj_changed).
+        self._scroll_pending = False
         # Largeur dynamique des bulles : on suit les labels affichés et on
         # recalcule leur largeur max selon la place réelle (cf. do_size_allocate).
         self._bubbles: list[Gtk.Label] = []
@@ -54,11 +77,25 @@ class SmsWindow(Gtk.Window):
         title = Gtk.Label(label="Messages")
         title.add_css_class("title")
         header.set_title_widget(title)
+
+        # Bouton d'appairage PIN (bascule vers le backend Android réel).
+        pair_btn = Gtk.Button.new_from_icon_name("channel-secure-symbolic")
+        pair_btn.set_tooltip_text("Appairer l'app compagnon Android (PIN)")
+        pair_btn.connect("clicked", self._on_pair_clicked)
+        header.pack_start(pair_btn)
+
+        # Bouton de rafraîchissement de la conversation courante (force reload).
+        refresh_btn = Gtk.Button.new_from_icon_name("view-refresh-symbolic")
+        refresh_btn.set_tooltip_text("Rafraîchir cette conversation")
+        refresh_btn.connect("clicked", self._on_refresh_clicked)
+        header.pack_end(refresh_btn)
+
         outer.append(header)
 
         # Banner: make the demo / no-real-send state explicit.
-        if not self._backend.is_ready:
-            outer.append(self._demo_banner())
+        self._banner_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        outer.append(self._banner_box)
+        self._refresh_banner()
 
         paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
         paned.set_vexpand(True)
@@ -88,7 +125,21 @@ class SmsWindow(Gtk.Window):
                 display, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
             )
 
-    def _demo_banner(self) -> Gtk.Widget:
+    def _refresh_banner(self) -> None:
+        """(Re)construit la bannière d'état selon le backend actif.
+
+        Affichée seulement si le backend n'est pas un canal réel (mock/démo, ou
+        Android non joignable). Vide sinon.
+        """
+        child = self._banner_box.get_first_child()
+        while child is not None:
+            nxt = child.get_next_sibling()
+            self._banner_box.remove(child)
+            child = nxt
+
+        if self._backend.is_ready:
+            return  # canal réel : pas de bannière
+
         bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         bar.add_css_class("sms-preview")
         bar.set_margin_top(6)
@@ -99,12 +150,12 @@ class SmsWindow(Gtk.Window):
         bar.append(icon)
         lbl = Gtk.Label(
             label=f"{self._backend.name} — l'envoi est simulé. "
-                  "Le SMS réel nécessitera l'app compagnon Android."
+                  "Cliquez sur l'icône cadenas pour appairer l'app compagnon Android."
         )
         lbl.set_wrap(True)
         lbl.set_xalign(0)
         bar.append(lbl)
-        return bar
+        self._banner_box.append(bar)
 
     # ── left: conversation list ──────────────────
 
@@ -126,6 +177,7 @@ class SmsWindow(Gtk.Window):
     def _conversation_row(self, convo: sms_core.Conversation) -> Gtk.ListBoxRow:
         row = Gtk.ListBoxRow()
         row._conversation_id = convo.id  # read back on selection
+        row._contact_name = convo.contact_name  # used by the send confirmation
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         box.set_margin_top(8)
@@ -160,6 +212,11 @@ class SmsWindow(Gtk.Window):
         self._thread_scroll = Gtk.ScrolledWindow()
         self._thread_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         self._thread_scroll.set_vexpand(True)
+        # Scroll auto en bas : "changed" se déclenche quand le contenu est mis en
+        # page (upper/page-size changent), donc après le rendu des bulles (P4).
+        self._thread_scroll.get_vadjustment().connect(
+            "changed", self._on_thread_adj_changed
+        )
 
         self._thread_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         self._thread_box.set_margin_top(12)
@@ -190,37 +247,117 @@ class SmsWindow(Gtk.Window):
         self._send_btn = Gtk.Button(label="Envoyer")
         self._send_btn.add_css_class("suggested-action")
         self._send_btn.set_sensitive(False)  # enabled only when text is present
-        self._send_btn.set_tooltip_text("Envoi simulé (app compagnon Android requise)")
         self._send_btn.connect("clicked", self._on_send)
         row.append(self._send_btn)
+        self._update_send_affordance()
         return row
+
+    def _is_android_backend(self) -> bool:
+        return isinstance(self._backend, sms_core.AndroidCompanionBackend)
+
+    def _update_send_affordance(self) -> None:
+        """Tooltip du bouton Envoyer selon le backend (réel vs démo)."""
+        if self._is_android_backend():
+            self._send_btn.set_tooltip_text(
+                "Envoie un vrai SMS via Android (confirmation demandée)"
+            )
+        else:
+            self._send_btn.set_tooltip_text(
+                "Envoi simulé (appairez l'app compagnon Android pour un envoi réel)"
+            )
 
     # ── handlers ─────────────────────────────────
 
     def _on_conversation_selected(self, _list: Gtk.ListBox, row: Gtk.ListBoxRow | None) -> None:
         if row is None:
             self._current_id = None
+            self._render_messages([])
             return
         self._current_id = getattr(row, "_conversation_id", None)
-        self._render_thread()
+        self._open_conversation(self._current_id)
 
     def _on_entry_changed(self, entry: Gtk.Entry) -> None:
         has_text = bool(entry.get_text().strip())
         self._send_btn.set_sensitive(has_text and self._current_id is not None)
 
+    def _on_refresh_clicked(self, _btn: Gtk.Button) -> None:
+        if self._current_id is None:
+            return
+        # Invalide le cache et recharge depuis le backend.
+        self._cache.pop(self._current_id, None)
+        self._open_conversation(self._current_id, force=True)
+
     def _on_send(self, _widget) -> None:
         body = self._entry.get_text().strip()
         if not body or self._current_id is None:
             return
-        # Simulated send: backend appends locally and reports it's not real.
-        sent, _msg = self._backend.send_message(self._current_id, body)
-        logger.debug("send simulated=%s", not sent)
-        self._entry.set_text("")
-        self._render_thread()
+        # Envoi réel (backend Android) → confirmation explicite obligatoire.
+        if self._is_android_backend():
+            self._confirm_real_send(self._current_id, body)
+            return
+        # Backend démo : envoi simulé, sans confirmation (rien ne quitte la machine).
+        self._do_send(self._current_id, body, real=False)
+
+    # ── chargement (cache + thread) ───────────────
+
+    def _open_conversation(self, conversation_id: str | None, force: bool = False) -> None:
+        """Affiche une conversation : depuis le cache si possible, sinon charge
+        en arrière-plan (sans bloquer l'UI). ``force`` ignore le cache."""
+        if conversation_id is None:
+            self._render_messages([])
+            return
+
+        if not force and conversation_id in self._cache:
+            logger.debug("SMS: conversation %s servie depuis le cache", conversation_id)
+            self._render_messages(self._cache[conversation_id])
+            return
+
+        # Pas en cache : on lance un chargement async et on affiche un état
+        # transitoire. Le compteur de génération évite d'afficher un résultat
+        # obsolète si l'utilisateur change de conversation entre-temps.
+        self._load_seq += 1
+        seq = self._load_seq
+        self._render_loading()
+
+        def worker() -> None:
+            t0 = time.perf_counter()
+            try:
+                convo = self._backend.get_conversation(conversation_id)
+                messages = list(convo.messages) if convo is not None else []
+                err: Exception | None = None
+            except Exception as exc:  # transport : ne doit jamais crasher l'UI
+                messages, err = [], exc
+            elapsed_ms = (time.perf_counter() - t0) * 1000
+            GLib.idle_add(
+                self._on_loaded, conversation_id, seq, messages, elapsed_ms, err
+            )
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_loaded(
+        self,
+        conversation_id: str,
+        seq: int,
+        messages: list[sms_core.Message],
+        elapsed_ms: float,
+        err: Exception | None,
+    ) -> bool:
+        if err is not None:
+            logger.warning("SMS: échec chargement %s: %s", conversation_id, err)
+        else:
+            logger.info(
+                "SMS: conversation %s chargée (%d messages) en %.0f ms",
+                conversation_id, len(messages), elapsed_ms,
+            )
+            self._cache[conversation_id] = messages
+        # N'affiche que si c'est toujours le dernier chargement demandé.
+        if seq == self._load_seq and conversation_id == self._current_id:
+            self._render_messages(messages)
+        return False  # one-shot
 
     # ── rendering ────────────────────────────────
 
-    def _render_thread(self) -> None:
+    def _clear_thread(self) -> None:
         child = self._thread_box.get_first_child()
         while child is not None:
             nxt = child.get_next_sibling()
@@ -228,22 +365,211 @@ class SmsWindow(Gtk.Window):
             child = nxt
         self._bubbles.clear()
 
-        if self._current_id is None:
-            return
-        convo = self._backend.get_conversation(self._current_id)
-        if convo is None:
-            return
+    def _render_loading(self) -> None:
+        self._clear_thread()
+        lbl = Gtk.Label(label="Chargement…")
+        lbl.add_css_class("sms-preview")
+        lbl.set_margin_top(16)
+        self._thread_box.append(lbl)
 
-        for message in convo.messages:
+    def _render_messages(self, messages: list[sms_core.Message]) -> None:
+        self._clear_thread()
+        for message in messages:
             self._thread_box.append(self._bubble(message))
-        # Ajuste tout de suite à la place actuelle (sinon valeur par défaut
-        # jusqu'au prochain redimensionnement).
+        # Largeur des bulles ajustée tout de suite à la place disponible.
         self._update_bubble_width()
+        # Arme le scroll auto en bas : appliqué quand le contenu sera mis en page.
+        self._scroll_pending = True
 
-        # Scroll to the latest message after layout settles.
-        adj = self._thread_scroll.get_vadjustment()
-        if adj is not None:
-            adj.set_value(adj.get_upper())
+    def _on_thread_adj_changed(self, adj: Gtk.Adjustment) -> None:
+        """Scrolle en bas une fois le contenu mesuré (P4).
+
+        ``changed`` est émis quand ``upper``/``page-size`` évoluent, c.-à-d.
+        après que les bulles sont mises en page : on peut alors viser le bas.
+        """
+        if not self._scroll_pending:
+            return
+        adj.set_value(max(0, adj.get_upper() - adj.get_page_size()))
+        # Considère le scroll fait dès qu'il y a du contenu réellement défilable
+        # (sinon on garde l'intention pour la prochaine mise en page).
+        if adj.get_upper() > adj.get_page_size():
+            self._scroll_pending = False
+
+    # ── envoi (avec confirmation pour le réel) ────
+
+    def _contact_name(self, conversation_id: str) -> str:
+        row = self._row_for_id(conversation_id)
+        return getattr(row, "_contact_name", conversation_id) if row else conversation_id
+
+    def _confirm_real_send(self, conversation_id: str, body: str) -> None:
+        """Demande une confirmation explicite avant d'envoyer un VRAI SMS (P1)."""
+        name = self._contact_name(conversation_id)
+        dialog = Gtk.AlertDialog()
+        dialog.set_modal(True)
+        dialog.set_message("Envoyer un vrai SMS ?")
+        dialog.set_detail(
+            f"Le message sera réellement envoyé à « {name} » via votre téléphone "
+            "Android. Cette action peut être facturée par votre opérateur."
+        )
+        dialog.set_buttons(["Annuler", "Envoyer"])
+        dialog.set_cancel_button(0)
+        dialog.set_default_button(1)
+
+        def on_response(dlg: Gtk.AlertDialog, res) -> None:
+            try:
+                choice = dlg.choose_finish(res)
+            except GLib.Error:
+                return  # fermé/annulé
+            if choice != 1:
+                logger.info("SMS: envoi réel annulé par l'utilisateur")
+                return
+            # Confirmation = autorisation explicite de l'envoi réel pour la session.
+            android_bridge.set_allow_real_send(True)
+            self._do_send(conversation_id, body, real=True)
+
+        dialog.choose(self, None, on_response)
+
+    def _do_send(self, conversation_id: str, body: str, real: bool) -> None:
+        try:
+            sent, detail = self._backend.send_message(conversation_id, body)
+        except Exception as exc:  # réseau/HTTP : ne jamais remonter dans GTK
+            logger.warning("SMS: envoi échoué (conv %s): %s", conversation_id, exc)
+            from app.ui.widgets import show_dialog
+            show_dialog(self, "Envoi SMS", f"Échec de l'envoi : {exc}", error=True)
+            return
+        logger.info(
+            "SMS: envoi (réel demandé=%s) → conv %s : transmis=%s detail=%r",
+            real, conversation_id, sent, detail,
+        )
+        self._entry.set_text("")
+
+        # Affichage optimiste : on ajoute le message localement si l'envoi a
+        # réussi, ou si on est en démo (envoi simulé volontairement visible).
+        if sent or not real:
+            echo = sms_core.Message(
+                body=body, timestamp=datetime.now(), outgoing=True
+            )
+            self._cache[conversation_id] = self._cache.get(conversation_id, []) + [echo]
+            if conversation_id == self._current_id:
+                self._render_messages(self._cache[conversation_id])
+
+        if not sent and detail:
+            from app.ui.widgets import show_dialog
+            show_dialog(self, "Envoi SMS", detail, error=real)
+
+    # ── appairage PIN ─────────────────────────────
+
+    def _on_pair_clicked(self, _btn: Gtk.Button) -> None:
+        """Ouvre une petite fenêtre modale : champ PIN + bouton Appairer (P5b)."""
+        win = Gtk.Window(title="Appairer l'app compagnon", transient_for=self, modal=True)
+        win.set_default_size(360, -1)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        box.set_margin_top(20)
+        box.set_margin_bottom(20)
+        box.set_margin_start(20)
+        box.set_margin_end(20)
+
+        info = Gtk.Label(
+            label="Saisissez le PIN affiché par l'app PhoneLink Companion "
+                  "(le port-forward ADB doit être actif)."
+        )
+        info.set_wrap(True)
+        info.set_xalign(0)
+        box.append(info)
+
+        entry = Gtk.Entry()
+        entry.set_placeholder_text("PIN à 6 chiffres")
+        entry.set_max_length(6)
+        entry.set_input_purpose(Gtk.InputPurpose.DIGITS)
+        box.append(entry)
+
+        status = Gtk.Label(label="")
+        status.set_wrap(True)
+        status.set_xalign(0)
+        box.append(status)
+
+        btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        btns.set_halign(Gtk.Align.END)
+        cancel = Gtk.Button(label="Annuler")
+        cancel.connect("clicked", lambda _b: win.destroy())
+        pair = Gtk.Button(label="Appairer")
+        pair.add_css_class("suggested-action")
+        btns.append(cancel)
+        btns.append(pair)
+        box.append(btns)
+        win.set_child(box)
+
+        def do_pair(_w=None) -> None:
+            pin = entry.get_text().strip()
+            if not pin:
+                status.set_text("Veuillez saisir le PIN.")
+                return
+            pair.set_sensitive(False)
+            status.set_text("Appairage en cours…")
+
+            def worker() -> None:
+                try:
+                    android_bridge.pair_and_save(pin)
+                    err: Exception | None = None
+                except Exception as exc:  # BridgeError et autres
+                    err = exc
+                GLib.idle_add(on_done, err)
+
+            def on_done(err: Exception | None) -> bool:
+                if err is not None:
+                    logger.warning("Appairage échoué: %s", err)
+                    status.set_text(f"Échec : {err}")
+                    pair.set_sensitive(True)
+                    return False
+                logger.info("Appairage réussi — bascule vers le backend Android")
+                win.destroy()
+                self._reload_backend()
+                return False
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        pair.connect("clicked", do_pair)
+        entry.connect("activate", do_pair)
+        win.present()
+
+    def _reload_backend(self) -> None:
+        """Recharge le backend (après appairage) et reconstruit la liste."""
+        sms_core.set_backend(None)  # forcera une re-sélection (config http+token)
+        self._backend = sms_core.get_backend()
+        logger.info("SMS: backend rechargé → %s", self._backend.name)
+        self._cache.clear()
+        self._current_id = None
+        self._refresh_banner()
+        self._update_send_affordance()
+        self._reload_conversation_list()
+
+    def _reload_conversation_list(self) -> None:
+        child = self._list.get_first_child()
+        while child is not None:
+            nxt = child.get_next_sibling()
+            self._list.remove(child)
+            child = nxt
+        try:
+            convos = self._backend.list_conversations()
+        except Exception as exc:
+            logger.warning("SMS: liste conversations indisponible: %s", exc)
+            convos = []
+        for convo in convos:
+            self._list.append(self._conversation_row(convo))
+        first = self._list.get_row_at_index(0)
+        if first is not None:
+            self._list.select_row(first)
+
+    def _row_for_id(self, conversation_id: str) -> Gtk.ListBoxRow | None:
+        index = 0
+        while True:
+            row = self._list.get_row_at_index(index)
+            if row is None:
+                return None
+            if getattr(row, "_conversation_id", None) == conversation_id:
+                return row
+            index += 1
 
     #: Largeur maximale d'une bulle, en caractères (≈ 60 % de la zone messages à
     #: la taille par défaut). Borne la largeur ET force le retour à la ligne.

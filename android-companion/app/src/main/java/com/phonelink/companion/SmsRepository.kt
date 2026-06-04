@@ -129,39 +129,58 @@ object SmsRepository {
         return JSONObject().put("conversations", array)
     }
 
+    /** Nombre de messages renvoyés par défaut (les plus récents). */
+    const val DEFAULT_MESSAGE_LIMIT = 200
+
     /**
-     * Messages d'une conversation, anciens → récents.
+     * Messages d'une conversation, anciens → récents (pour l'affichage).
+     *
+     * On récupère les **[limit] messages les plus récents** (tri `DATE DESC` +
+     * `LIMIT`), puis on **inverse** pour les renvoyer du plus ancien au plus
+     * récent. C'est volontaire : sur un long fil, on veut les derniers messages,
+     * pas les premiers.
      *
      * Renvoie `{ "conversation_id": id, "messages": [ {body, timestamp,
      * outgoing}, … ] }`.
      */
-    fun messages(context: Context, conversationId: String): JSONObject {
+    fun messages(
+        context: Context,
+        conversationId: String,
+        limit: Int = DEFAULT_MESSAGE_LIMIT,
+    ): JSONObject {
         val resolver = context.contentResolver
         val projection = arrayOf(
             Telephony.Sms.BODY,
             Telephony.Sms.DATE,
             Telephony.Sms.TYPE,
         )
+        val safeLimit = limit.coerceIn(1, 2000)
 
-        val array = JSONArray()
+        // Les N plus récents (DESC + LIMIT), puis on inverse vers ASC.
+        val recent = ArrayList<JSONObject>(safeLimit)
         resolver.query(
             Telephony.Sms.CONTENT_URI,
             projection,
             "${Telephony.Sms.THREAD_ID} = ?",
             arrayOf(conversationId),
-            "${Telephony.Sms.DATE} ASC",
+            "${Telephony.Sms.DATE} DESC LIMIT $safeLimit",
         )?.use { c ->
             val idxBody = c.getColumnIndexOrThrow(Telephony.Sms.BODY)
             val idxDate = c.getColumnIndexOrThrow(Telephony.Sms.DATE)
             val idxType = c.getColumnIndexOrThrow(Telephony.Sms.TYPE)
             while (c.moveToNext()) {
-                array.put(
+                recent.add(
                     JSONObject()
                         .put("body", c.getString(idxBody).orEmpty())
                         .put("timestamp", c.getLong(idxDate))
                         .put("outgoing", isOutgoing(c.getInt(idxType)))
                 )
             }
+        }
+
+        val array = JSONArray()
+        for (i in recent.indices.reversed()) {
+            array.put(recent[i])
         }
         return JSONObject()
             .put("conversation_id", conversationId)
