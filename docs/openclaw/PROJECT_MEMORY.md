@@ -2,45 +2,92 @@
 
 Date d'analyse : 2026-05-31
 
-## Mise à jour terrain — 2026-06-04 — V0.6 SMS/MMS/RCS-like
+## État projet — 2026-06-04 — après validation terrain V0.6
 
-Validation terrain réussie sur la branche `feat/v0.6-rcs-notifications`.
-PhoneLink Ubuntu V0.6 affiche maintenant l'historique récent de la conversation
+Branche actuelle : `feat/v0.6-rcs-notifications`.
+
+La V0.5 est validée : SMS réels Android, appairage PIN/token, backend Android
+automatique après appairage, fallback mock conservé et interface GTK
+fonctionnelle.
+
+La V0.6 est validée sur le terrain pour la lecture étendue SMS/MMS/RCS-like :
+PhoneLink Ubuntu affiche maintenant l'historique récent de la conversation
 Cathy au-delà du 28/05, comme KDE Connect.
 
-Cause racine résolue :
+### Point technique découvert
 
-- PhoneLink lisait seulement `Telephony.Sms` / `content://sms`.
-- KDE Connect lit aussi les providers SMS/MMS combinés (`content://mms-sms`,
-  `Telephony.Mms`) et les parts MMS.
-- Pour Cathy, `content://sms` s'arrêtait au 28/05, mais
-  `content://mms-sms/conversations` voyait le `thread_id=4` au 04/06.
-- La ligne récente avait un corps nul dans le résumé provider ; le texte était
-  disponible dans `content://mms/part` via `mid = _id`.
-- La lecture des parts MMS `text/plain` / `text/*`, avec fallback `_data` via
-  `ContentResolver.openInputStream()`, donne la parité KDE Connect sur ce fil.
+PhoneLink lisait initialement uniquement `Telephony.Sms` / `content://sms`. Cela
+bloquait l'historique de certaines conversations, notamment Cathy après le
+28/05.
 
-État validé :
+KDE Connect lit plus largement les providers Android publics :
 
-- SMS classiques : OK.
-- MMS/RCS-like visibles via provider `mms-sms` / `mms` : OK.
-- Parts MMS texte : OK.
-- Affichage GTK : OK, validé visuellement.
-- `/v1/conversations` : optimisé en lazy loading, ne lit plus les parts MMS.
-- `/v1/messages?conversation_id=<thread_id>` : charge les détails au clic, avec
+- `content://mms-sms` ;
+- `content://mms` / `Telephony.Mms` ;
+- `content://mms/part`.
+
+Pour Cathy, `content://sms` s'arrêtait au 28/05, mais
+`content://mms-sms/conversations` voyait le `thread_id=4` au 04/06. La ligne
+récente exposait des métadonnées MMS/RCS-like (`ct_t=text/plain`, `m_type=132`,
+`msg_box=1`) avec `body=null` et `address=null`. Le texte était récupérable dans
+les parts MMS via `content://mms/part`, filtré par `mid = _id`.
+
+Cause résolue : la lecture provider était trop limitée. Le correctif validé est
+la lecture `mms-sms` / `mms` + parts MMS `text/plain` / `text/*`, avec fallback
+`_data` via `ContentResolver.openInputStream()`, plus lazy loading pour éviter
+les timeouts.
+
+### Ce qui fonctionne maintenant
+
+- SMS classiques via `Telephony.Sms`.
+- Conversations via provider `mms-sms` / `mms`.
+- Lecture des parts MMS via `content://mms/part`.
+- Conversation Cathy validée visuellement dans GTK avec les messages après le
+  28/05.
+- `/v1/conversations` reste léger et rapide ; il ne lit pas les parts MMS.
+- `/v1/messages?conversation_id=<ID>` charge les détails uniquement au clic :
   SMS + MMS + parts MMS, tri ancien -> récent.
-- Cache GTK par `conversation_id` : réaffichage instantané au retour sur un fil ;
-  le bouton Rafraîchir force le rechargement.
-- Endpoints debug conservés : `/v1/debug/mms-parts`,
-  `/v1/debug/notifications`, `/v1/debug/sms-provider`.
+- Cache GTK/Python par `conversation_id` fonctionnel : retour instantané sur une
+  conversation déjà ouverte ; le bouton Rafraîchir force le rechargement.
+- Plus de timeout GTK après optimisation du lazy loading.
+- Appairage GTK avec cadenas fonctionnel.
+- Backend Android automatique fonctionnel après appairage.
+- Notifications Android ajoutées pour préparer les RCS via
+  `NotificationListenerService`, `getActiveNotifications()` et
+  `MessagingStyle`.
+- Fallback mock conservé.
 
-Limites restantes :
+### Ce qui reste à faire
 
-- RemoteInput / envoi RCS non implémenté en V0.6.0.
-- L'envoi SMS existant ne doit pas être modifié dans ce chantier.
-- Les notifications Google Messages restent une source complémentaire, pas une
-  base d'historique RCS complète.
-- Ne pas merger automatiquement dans `main`.
+- Stabiliser encore la V0.6 avec plusieurs conversations réelles.
+- Tester redémarrage téléphone et redémarrage app companion.
+- Tester la persistance du cache RCS local.
+- Tester l'envoi SMS classique après les changements provider/MMS.
+- Corriger ou valider définitivement les endpoints debug si besoin :
+  `/v1/debug/notifications`, `/v1/debug/sms-provider`,
+  `/v1/debug/mms-parts`.
+- Préparer la V0.6.1 : réponse RCS via `RemoteInput`.
+- Ne pas merger dans `main` avant validation complète.
+
+### Contraintes importantes
+
+- Ne pas lire la base privée Google Messages.
+- Pas de root.
+- Pas de contournement Android.
+- Garder l'approche propre type KDE Connect : providers publics Android +
+  notifications officielles.
+- Garder le mock/fallback.
+- Garder `RemoteInput` hors V0.6 actuelle.
+
+### Dernière validation terrain
+
+- Date : 2026-06-04.
+- Résultat : PhoneLink Ubuntu affiche enfin l'historique récent de Cathy comme
+  KDE Connect.
+- Cause résolue : lecture provider trop limitée.
+- Correctif validé : lecture `mms-sms` + parts MMS + lazy loading.
+
+Les sections ci-dessous restent l'analyse historique initiale du dépôt en V0.1.
 
 ## Synthèse
 
