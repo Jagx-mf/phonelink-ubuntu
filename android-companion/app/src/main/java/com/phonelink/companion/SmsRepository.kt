@@ -6,9 +6,11 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.os.SystemClock
 import android.provider.ContactsContract
 import android.provider.Telephony
 import android.telephony.SmsManager
+import android.util.Log
 import androidx.core.content.ContextCompat
 import org.json.JSONArray
 import org.json.JSONObject
@@ -28,6 +30,7 @@ import org.json.JSONObject
  */
 object SmsRepository {
 
+    private const val TAG = "SmsRepository"
     private val MMS_PART_URI: Uri = Uri.parse("content://mms/part")
 
     // ---- permissions -----------------------------------------------------
@@ -59,16 +62,29 @@ object SmsRepository {
         val unreadIncoming: Boolean,
     )
 
+    private data class MmsReadResult(
+        val messages: List<ProviderMessage>,
+        val partsRead: Int,
+    )
+
+    private data class MmsTextResult(
+        val text: String,
+        val partsRead: Int,
+    )
+
     /**
      * Conversations, plus récente d'abord.
      *
-     * V0.6 RC : on fusionne SMS (`content://sms`) et MMS (`content://mms` +
-     * `content://mms/part`) pour atteindre la même surface que KDE Connect.
+     * V0.6 RC : on fusionne SMS (`content://sms`) et métadonnées MMS
+     * (`content://mms`) pour atteindre la même surface que KDE Connect sans
+     * lire `content://mms/part` dans la liste. Le corps complet des MMS est lu
+     * uniquement par [messages] sur le thread ouvert.
      *
      * Renvoie `{ "conversations": [ {id, contact_name, phone_number,
      * last_message, last_timestamp, unread}, … ] }`.
      */
     fun conversations(context: Context, scanLimit: Int = 1000): JSONObject {
+        val started = SystemClock.elapsedRealtime()
         data class Summary(
             var address: String,
             var lastBody: String,
@@ -78,8 +94,14 @@ object SmsRepository {
 
         val byThread = LinkedHashMap<Long, Summary>()
         val contactCache = HashMap<String, String>()
-        val messages = readRecentSmsMessages(context, null, scanLimit) +
-            readRecentMmsMessages(context, null, scanLimit)
+        val smsMessages = readRecentSmsMessages(context, null, scanLimit)
+        val mmsMessages = readRecentMmsMessages(
+            context,
+            threadId = null,
+            limit = scanLimit,
+            readTextParts = false,
+        )
+        val messages = smsMessages + mmsMessages.messages
 
         for (message in messages.sortedByDescending { it.timestamp }) {
             val existing = byThread[message.threadId]
@@ -117,6 +139,13 @@ object SmsRepository {
                     .put("unread", s.unread)
             )
         }
+        Log.i(
+            TAG,
+            "/v1/conversations: ${array.length()} conversations in " +
+                "${SystemClock.elapsedRealtime() - started}ms " +
+                "sms=${smsMessages.size} mms=${mmsMessages.messages.size} " +
+                "mmsParts=${mmsMessages.partsRead}",
+        )
         return JSONObject().put("conversations", array)
     }
 
@@ -139,13 +168,25 @@ object SmsRepository {
         conversationId: String,
         limit: Int = DEFAULT_MESSAGE_LIMIT,
     ): JSONObject {
+        val started = SystemClock.elapsedRealtime()
         val safeLimit = limit.coerceIn(1, 2000)
         val threadId = conversationId.toLongOrNull()
-        val recent = if (threadId == null) {
-            emptyList()
+        val smsMessages: List<ProviderMessage>
+        val mmsMessages: MmsReadResult
+        val recent: List<ProviderMessage>
+        if (threadId == null) {
+            smsMessages = emptyList()
+            mmsMessages = MmsReadResult(emptyList(), 0)
+            recent = emptyList()
         } else {
-            (readRecentSmsMessages(context, threadId, safeLimit) +
-                readRecentMmsMessages(context, threadId, safeLimit))
+            smsMessages = readRecentSmsMessages(context, threadId, safeLimit)
+            mmsMessages = readRecentMmsMessages(
+                context,
+                threadId = threadId,
+                limit = safeLimit,
+                readTextParts = true,
+            )
+            recent = (smsMessages + mmsMessages.messages)
                 .sortedByDescending { it.timestamp }
                 .take(safeLimit)
         }
@@ -159,6 +200,13 @@ object SmsRepository {
                     .put("outgoing", message.outgoing)
             )
         }
+        Log.i(
+            TAG,
+            "/v1/messages: thread=$conversationId returned=${array.length()} " +
+                "in ${SystemClock.elapsedRealtime() - started}ms " +
+                "sms=${smsMessages.size} mms=${mmsMessages.messages.size} " +
+                "mmsParts=${mmsMessages.partsRead}",
+        )
         return JSONObject()
             .put("conversation_id", conversationId)
             .put("messages", array)
@@ -220,7 +268,8 @@ object SmsRepository {
         context: Context,
         threadId: Long?,
         limit: Int,
-    ): List<ProviderMessage> {
+        readTextParts: Boolean,
+    ): MmsReadResult {
         val projection = arrayOf(
             Telephony.Mms._ID,
             Telephony.Mms.THREAD_ID,
@@ -231,6 +280,7 @@ object SmsRepository {
         val selection = threadId?.let { "${Telephony.Mms.THREAD_ID} = ?" }
         val selectionArgs = threadId?.let { arrayOf(it.toString()) }
         val messages = ArrayList<ProviderMessage>(limit)
+        var partsRead = 0
         try {
             queryWithSortFallback(
                 context,
@@ -249,11 +299,22 @@ object SmsRepository {
                 while (c.moveToNext() && messages.size < limit) {
                     val id = c.getLong(idxId)
                     val messageBox = c.getInt(idxBox)
-                    val body = readMmsText(context, id)
+                    val body = if (readTextParts) {
+                        val text = readMmsText(context, id)
+                        partsRead += text.partsRead
+                        text.text
+                    } else {
+                        "MMS"
+                    }
+                    val address = if (readTextParts) {
+                        readMmsAddress(context, id, messageBox)
+                    } else {
+                        ""
+                    }
                     messages.add(
                         ProviderMessage(
                             threadId = c.getLong(idxThread),
-                            address = readMmsAddress(context, id, messageBox),
+                            address = address,
                             body = body,
                             timestamp = normalizeProviderTimestamp(c.getLong(idxDate)),
                             outgoing = isMmsOutgoing(messageBox),
@@ -266,7 +327,7 @@ object SmsRepository {
         } catch (e: Exception) {
             // Certains ROMs exposent partiellement content://mms ; on garde les SMS.
         }
-        return messages
+        return MmsReadResult(messages, partsRead)
     }
 
     private fun queryWithSortFallback(
@@ -297,12 +358,7 @@ object SmsRepository {
         }
     }
 
-    private fun readMmsText(context: Context, mid: Long): String {
-        val parts = readMmsTextParts(context, mid)
-        return parts.joinToString("\n").trim()
-    }
-
-    private fun readMmsTextParts(context: Context, mid: Long): List<String> {
+    private fun readMmsText(context: Context, mid: Long): MmsTextResult {
         val projection = arrayOf(
             Telephony.Mms.Part._ID,
             Telephony.Mms.Part._DATA,
@@ -310,6 +366,7 @@ object SmsRepository {
             Telephony.Mms.Part.TEXT,
         )
         val parts = ArrayList<String>()
+        var partsRead = 0
         try {
             context.contentResolver.query(
                 MMS_PART_URI,
@@ -325,6 +382,7 @@ object SmsRepository {
                 while (c.moveToNext()) {
                     val contentType = c.getString(idxType).orEmpty()
                     if (!isTextContentType(contentType)) continue
+                    partsRead += 1
                     val text = if (!c.isNull(idxData)) {
                         readMmsPartData(context, c.getLong(idxId))
                     } else {
@@ -336,7 +394,7 @@ object SmsRepository {
         } catch (e: Exception) {
             // Une part illisible ne doit pas bloquer le reste du fil.
         }
-        return parts
+        return MmsTextResult(parts.joinToString("\n").trim(), partsRead)
     }
 
     private fun readMmsPartData(context: Context, partId: Long): String {

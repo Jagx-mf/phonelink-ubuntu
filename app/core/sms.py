@@ -209,6 +209,7 @@ class AndroidCompanionBackend(SmsBackend):
 
     def __init__(self, bridge: Optional[android_bridge.AndroidBridge] = None) -> None:
         self._bridge = bridge or android_bridge.get_bridge()
+        self._conversation_meta: dict[str, android_bridge.BridgeConversation] = {}
 
     @property
     def is_ready(self) -> bool:
@@ -225,7 +226,9 @@ class AndroidCompanionBackend(SmsBackend):
     def list_conversations(self) -> list[Conversation]:
         convos: list[Conversation] = []
         # 1) Conversations SMS/MMS (provider Telephony).
-        for bc in self._bridge.list_conversations():
+        bridge_convos = self._bridge.list_conversations()
+        self._conversation_meta = {bc.id: bc for bc in bridge_convos}
+        for bc in bridge_convos:
             # The /conversations summary carries only the last message preview,
             # not the full thread — synthesize a single Message so the list view
             # can render its preview. The outgoing flag is unknown here (the API
@@ -282,13 +285,14 @@ class AndroidCompanionBackend(SmsBackend):
         if conversation_id.startswith(self.RCS_ID_PREFIX):
             return self._get_rcs_conversation(conversation_id)
 
-        # Metadata (name/number) lives in the conversation summary; the full
-        # thread comes from /messages. Two calls, but keeps the bridge contract
-        # simple and matches docs/android-backend-v0.4.md.
-        meta = next(
-            (c for c in self._bridge.list_conversations() if c.id == conversation_id),
-            None,
-        )
+        # Metadata (name/number) comes from the latest /conversations result.
+        # Avoid reloading the full list when the user opens a thread from the
+        # visible list; /messages is the only expensive call at that point.
+        meta = self._conversation_meta.get(conversation_id)
+        if meta is None:
+            bridge_convos = self._bridge.list_conversations()
+            self._conversation_meta.update({c.id: c for c in bridge_convos})
+            meta = self._conversation_meta.get(conversation_id)
         if meta is None:
             return None
         messages = [
