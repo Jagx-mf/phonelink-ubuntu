@@ -11,6 +11,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.Locale
 
 /**
  * Capture des messages RCS via les notifications de Google Messages
@@ -133,7 +134,7 @@ class RcsNotificationListener : NotificationListenerService() {
         var added = 0
         var extractedCount = 0
         var lastSender = ""
-        var conversationKey = firstNonBlank(shortcut, convoTitle, title, sbn.key)
+        var conversationKey = stableConversationKey(shortcut, convoTitle, title, "", sbn.key)
         var contactName = firstNonBlank(convoTitle, title)
         var source = "none"
         val timestamps = ArrayList<Long>()
@@ -145,7 +146,7 @@ class RcsNotificationListener : NotificationListenerService() {
                 val sender = message.person?.name?.toString().orEmpty()
                 if (sender.isNotBlank()) lastSender = sender
                 val outgoing = message.person == null
-                val key = firstNonBlank(shortcut, convoTitle, sender, title, sbn.key)
+                val key = stableConversationKey(shortcut, convoTitle, title, sender, sbn.key)
                 val contact = firstNonBlank(convoTitle, sender, title)
                 conversationKey = key
                 contactName = contact
@@ -168,10 +169,13 @@ class RcsNotificationListener : NotificationListenerService() {
             if (extractedCount == 0 && title.isNotBlank()) {
                 val body = bigText.ifBlank { text }
                 if (body.isNotBlank() &&
-                    RcsMessageStore.add(firstNonBlank(shortcut, title), title, body,
+                    RcsMessageStore.add(
+                        stableConversationKey(shortcut, null, title, "", sbn.key),
+                        title,
+                        body,
                         sbn.postTime, false, title)) {
                     source = "text"
-                    conversationKey = firstNonBlank(shortcut, title)
+                    conversationKey = stableConversationKey(shortcut, null, title, "", sbn.key)
                     contactName = title
                     timestamps.add(sbn.postTime)
                     added++; extractedCount = 1
@@ -223,14 +227,14 @@ class RcsNotificationListener : NotificationListenerService() {
             return ExtraCaptureResult(
                 added = 0,
                 seen = 0,
-                conversationKey = firstNonBlank(shortcut, convoTitle, title),
+                conversationKey = stableConversationKey(shortcut, convoTitle, title, "", sbn.key),
                 contactName = firstNonBlank(convoTitle, title),
                 timestamps = emptyList(),
             )
         }
         var added = 0
         var seen = 0
-        var conversationKey = firstNonBlank(shortcut, convoTitle, title, sbn.key)
+        var conversationKey = stableConversationKey(shortcut, convoTitle, title, "", sbn.key)
         var contactName = firstNonBlank(convoTitle, title)
         val timestamps = ArrayList<Long>()
         for (b in raw) {
@@ -240,7 +244,7 @@ class RcsNotificationListener : NotificationListenerService() {
             val time = b.getLong("time", sbn.postTime)
             val sender = b.getCharSequence("sender")?.toString().orEmpty()
             val outgoing = sender.isBlank()
-            val key = firstNonBlank(shortcut, convoTitle, sender, title, sbn.key)
+            val key = stableConversationKey(shortcut, convoTitle, title, sender, sbn.key)
             val contact = firstNonBlank(convoTitle, sender, title)
             conversationKey = key
             contactName = contact
@@ -347,6 +351,30 @@ class RcsNotificationListener : NotificationListenerService() {
 
     private fun firstNonBlank(vararg values: String?): String =
         values.firstOrNull { !it.isNullOrBlank() } ?: ""
+
+    private fun stableConversationKey(
+        shortcut: String,
+        convoTitle: String?,
+        title: String,
+        sender: String,
+        fallback: String,
+    ): String {
+        val shortcutValue = shortcut.trim().let {
+            if (it.lowercase(Locale.ROOT).startsWith("shortcut:")) it.substringAfter(':') else it
+        }
+        val shortcutKey = normalisedKeyPart(shortcutValue)
+        if (shortcutKey.isNotBlank()) return "shortcut:$shortcutKey"
+        val titleKey = normalisedKeyPart(firstNonBlank(convoTitle, title))
+        if (titleKey.isNotBlank()) return "title:$titleKey"
+        val senderKey = normalisedKeyPart(sender)
+        if (senderKey.isNotBlank()) return "sender:$senderKey"
+        return "notification:${fallback.trim()}"
+    }
+
+    private fun normalisedKeyPart(value: String): String =
+        value.trim()
+            .lowercase(Locale.ROOT)
+            .replace(Regex("\\s+"), " ")
 
     private fun String.q(): String = "\"${this.take(60)}\""
 

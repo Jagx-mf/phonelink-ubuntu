@@ -102,6 +102,7 @@ class BridgeMessage:
     body: str
     timestamp: datetime
     outgoing: bool
+    sender: str = ""
 
 
 @dataclass(frozen=True)
@@ -446,6 +447,7 @@ def _parse_message(raw: dict) -> BridgeMessage:
         body=str(raw.get("body", "")),
         timestamp=_epoch_ms_to_dt(raw.get("timestamp")) or datetime.now(),
         outgoing=bool(raw.get("outgoing", False)),
+        sender=str(raw.get("sender", "")),
     )
 
 

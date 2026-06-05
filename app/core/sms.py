@@ -24,15 +24,28 @@ environment variable (``mock`` | ``android``) or an explicit :func:`set_backend`
 from __future__ import annotations
 
 import os
+import re
+import unicodedata
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from difflib import SequenceMatcher
 from typing import Optional
 
 from app.core import android_bridge
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+RCS_PROVIDER_DUPLICATE_WINDOW_SECONDS = 120
+
+#: Fenêtre (en secondes) pour rattacher un fil RCS au thread provider du même
+#: contact quand le message RCS n'est PAS déjà dans le provider (cas Cathy :
+#: notif texte récente vs MMS provider « placeholder »). Plus large que la
+#: fenêtre de doublon : il s'agit ici de reconnaître « même conversation
+#: vivante », pas « même message exact ». Bornée pour ne pas fusionner deux fils
+#: homonymes éloignés dans le temps.
+RCS_PROVIDER_ATTRIBUTION_WINDOW_SECONDS = 6 * 3600
 
 
 # ──────────────────────────────────────────────
@@ -60,6 +73,15 @@ class Conversation:
     @property
     def last_message(self) -> Optional[Message]:
         return self.messages[-1] if self.messages else None
+
+
+@dataclass(frozen=True)
+class _ProviderSummary:
+    id: str
+    contact_name: str
+    phone_number: str
+    last_message: str
+    last_timestamp: Optional[datetime]
 
 
 # ──────────────────────────────────────────────
@@ -192,6 +214,166 @@ class MockSmsBackend(SmsBackend):
 
 
 # ──────────────────────────────────────────────
+# RCS/provider duplicate filtering helpers
+# ──────────────────────────────────────────────
+
+def _strip_accents(value: str) -> str:
+    text = unicodedata.normalize("NFKD", value or "")
+    return "".join(ch for ch in text if not unicodedata.combining(ch))
+
+
+def _normalise_phone(value: str) -> str:
+    digits = re.sub(r"\D+", "", value or "")
+    if len(digits) < 4:
+        return ""
+    if digits.startswith("00"):
+        digits = digits[2:]
+    if len(digits) == 10 and digits.startswith("0"):
+        digits = "33" + digits[1:]
+    return digits
+
+
+def _normalise_name(value: str) -> str:
+    text = _strip_accents(value).casefold()
+    text = re.sub(r"[^0-9a-z]+", " ", text).strip()
+    return re.sub(r"\s+", " ", text)
+
+
+def _normalise_body(value: str) -> str:
+    text = _strip_accents(value).casefold()
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _identity_keys(*values: str) -> set[str]:
+    keys: set[str] = set()
+    for value in values:
+        phone = _normalise_phone(value)
+        if phone:
+            keys.add("phone:" + phone)
+            continue
+        name = _normalise_name(value)
+        if name:
+            keys.add("name:" + name)
+    return keys
+
+
+def _timestamps_close(left: Optional[datetime], right: Optional[datetime]) -> bool:
+    if left is None or right is None:
+        return False
+    delta = abs((left - right).total_seconds())
+    return delta <= RCS_PROVIDER_DUPLICATE_WINDOW_SECONDS
+
+
+def _messages_close(left: str, right: str) -> bool:
+    left_norm = _normalise_body(left)
+    right_norm = _normalise_body(right)
+    if not left_norm or not right_norm:
+        return False
+    if left_norm == right_norm:
+        return True
+    shorter, longer = sorted((left_norm, right_norm), key=len)
+    if len(shorter) >= 16 and shorter in longer:
+        return True
+    if min(len(left_norm), len(right_norm)) < 16:
+        return False
+    return SequenceMatcher(None, left_norm, right_norm).ratio() >= 0.92
+
+
+def _match_rcs_to_provider(
+    thread: android_bridge.RcsThread,
+    providers: list[_ProviderSummary],
+) -> tuple[Optional[str], bool]:
+    """Rattache un fil RCS (notifications) à un thread provider du même contact.
+
+    Renvoie ``(provider_id, covered)`` :
+
+    * ``(id, True)`` — le dernier message RCS est **déjà** dans ce thread
+      provider (même identité + timestamp proche + texte proche, cas broadcast
+      type 36608). La ligne RCS est masquée et **rien n'est fusionné** (le
+      provider porte déjà le message ; fusionner risquerait un doublon
+      intra-fil).
+    * ``(id, False)`` — le fil RCS appartient clairement à ce thread provider
+      mais porte des messages **absents** du provider (cas Cathy : texte de
+      notification vs MMS « placeholder »). La ligne RCS est masquée et ses
+      messages sont **fusionnés** dans le thread à l'ouverture.
+    * ``(None, False)`` — aucun rattachement sûr : le fil RCS reste une
+      conversation autonome en lecture seule (aucune perte de message).
+    """
+    last = thread.messages[-1] if thread.messages else None
+    if last is None:
+        return None, False
+
+    rcs_keys = _identity_keys(thread.contact_name, last.sender)
+    if not rcs_keys:
+        return None, False
+
+    candidates: list[tuple[_ProviderSummary, set[str]]] = []
+    for provider in providers:
+        provider_keys = _identity_keys(provider.contact_name, provider.phone_number)
+        shared = provider_keys.intersection(rcs_keys)
+        if shared:
+            candidates.append((provider, shared))
+    if not candidates:
+        return None, False
+
+    # 1) Déjà couvert (même message présent côté provider) → masquer sans fusion.
+    for provider, _shared in candidates:
+        if (
+            _timestamps_close(provider.last_timestamp, last.timestamp)
+            and _messages_close(provider.last_message, last.body)
+        ):
+            return provider.id, True
+
+    # 2) Sinon : rattacher au thread provider le plus proche dans le temps
+    #    (même conversation vivante). Désambiguïse les contacts homonymes (deux
+    #    « Cathy » de numéros différents → on prend le thread le plus récent).
+    def _delta(provider: _ProviderSummary) -> float:
+        if provider.last_timestamp is None or last.timestamp is None:
+            return float("inf")
+        return abs((provider.last_timestamp - last.timestamp).total_seconds())
+
+    best, best_shared = min(candidates, key=lambda c: _delta(c[0]))
+    phone_match = any(key.startswith("phone:") for key in best_shared)
+    if phone_match or _delta(best) <= RCS_PROVIDER_ATTRIBUTION_WINDOW_SECONDS:
+        return best.id, False
+    return None, False
+
+
+def _merge_rcs_messages(
+    messages: list[Message],
+    threads: list[android_bridge.RcsThread],
+) -> list[Message]:
+    """Fusionne les messages RCS rattachés dans un thread provider ouvert.
+
+    Dédup stricte par ``(seconde, corps normalisé)`` pour ne jamais réintroduire
+    un message déjà présent côté provider, puis tri chronologique. Les messages
+    RCS gardent ``source="rcs"`` (badge horodatage côté UI).
+    """
+    def _key(ts: datetime, body: str) -> tuple[int, str]:
+        return int(ts.timestamp()), _normalise_body(body)
+
+    seen = {_key(m.timestamp, m.body) for m in messages}
+    merged = list(messages)
+    for thread in threads:
+        for m in thread.messages:
+            key = _key(m.timestamp, m.body)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(
+                Message(
+                    body=m.body,
+                    timestamp=m.timestamp,
+                    outgoing=m.outgoing,
+                    source="rcs",
+                )
+            )
+    merged.sort(key=lambda m: m.timestamp)
+    return merged
+
+
+# ──────────────────────────────────────────────
 # Android companion backend (via android_bridge)
 # ──────────────────────────────────────────────
 
@@ -210,6 +392,10 @@ class AndroidCompanionBackend(SmsBackend):
     def __init__(self, bridge: Optional[android_bridge.AndroidBridge] = None) -> None:
         self._bridge = bridge or android_bridge.get_bridge()
         self._conversation_meta: dict[str, android_bridge.BridgeConversation] = {}
+        #: provider_id → fils RCS rattachés (fusionnés à l'ouverture du thread).
+        #: Rempli par :meth:`list_conversations`, consommé par
+        #: :meth:`get_conversation`.
+        self._rcs_attribution: dict[str, list[android_bridge.RcsThread]] = {}
 
     @property
     def is_ready(self) -> bool:
@@ -225,6 +411,7 @@ class AndroidCompanionBackend(SmsBackend):
 
     def list_conversations(self) -> list[Conversation]:
         convos: list[Conversation] = []
+        provider_summaries: list[_ProviderSummary] = []
         # 1) Conversations SMS/MMS (provider Telephony).
         bridge_convos = self._bridge.list_conversations()
         self._conversation_meta = {bc.id: bc for bc in bridge_convos}
@@ -251,11 +438,39 @@ class AndroidCompanionBackend(SmsBackend):
                     source="sms",
                 )
             )
+            provider_summaries.append(
+                _ProviderSummary(
+                    id=bc.id,
+                    contact_name=bc.contact_name,
+                    phone_number=bc.phone_number,
+                    last_message=bc.last_message,
+                    last_timestamp=bc.last_timestamp,
+                )
+            )
 
-        # 2) Fils RCS captés via notifications (lecture seule, V0.6.0). Gardés
-        # comme entrées distinctes (id préfixé) avec un badge côté UI : on ne les
-        # fusionne pas au thread SMS du même contact (appariement non fiable).
+        # 2) Fils RCS captés via notifications (lecture seule, V0.6.0). Les
+        # notifications complètent l'historique provider sans le dupliquer
+        # (parité KDE Connect : un fil réel = une ligne) :
+        #   - déjà couvert par le provider → masqué, pas de fusion ;
+        #   - même contact mais message absent du provider (Cathy : texte vs
+        #     MMS) → masqué et fusionné dans le thread provider à l'ouverture ;
+        #   - rattachement incertain → conservé en ligne RCS autonome.
+        self._rcs_attribution = {}
         for thread in self._bridge.list_rcs():
+            provider_id, covered = _match_rcs_to_provider(thread, provider_summaries)
+            if provider_id is not None:
+                if not covered:
+                    self._rcs_attribution.setdefault(provider_id, []).append(thread)
+                    logger.debug(
+                        "RCS rattaché au thread provider %s (fusion à l'ouverture)",
+                        provider_id,
+                    )
+                else:
+                    logger.debug(
+                        "RCS ignoré dans la liste: déjà couvert par provider %s",
+                        provider_id,
+                    )
+                continue
             last = thread.messages[-1] if thread.messages else None
             convos.append(
                 Conversation(
@@ -299,6 +514,11 @@ class AndroidCompanionBackend(SmsBackend):
             Message(body=m.body, timestamp=m.timestamp, outgoing=m.outgoing)
             for m in self._bridge.list_messages(conversation_id)
         ]
+        # Fusionne l'historique RCS rattaché à ce thread (cf. list_conversations),
+        # de sorte que SMS/MMS/RCS du même fil réel apparaissent ensemble.
+        rcs_threads = self._rcs_attribution.get(conversation_id)
+        if rcs_threads:
+            messages = _merge_rcs_messages(messages, rcs_threads)
         return Conversation(
             id=meta.id,
             contact_name=meta.contact_name,
@@ -325,6 +545,8 @@ class AndroidCompanionBackend(SmsBackend):
         )
 
     def send_message(self, conversation_id: str, body: str) -> tuple[bool, str]:
+        if conversation_id.startswith(self.RCS_ID_PREFIX):
+            return False, "Conversation RCS en lecture seule"
         result = self._bridge.send_message(body, conversation_id=conversation_id)
         return result.sent, result.detail
 
