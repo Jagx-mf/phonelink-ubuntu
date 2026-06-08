@@ -254,6 +254,70 @@ class RcsNotificationListener : NotificationListenerService() {
         return ExtraCaptureResult(added, seen, conversationKey, contactName, timestamps)
     }
 
+    // ---- snapshot notifications actives (V0.8, lecture seule) -------------
+
+    /**
+     * Snapshot lecture seule des notifications Android **actives, toutes
+     * applications** (pour `GET /v1/notifications`, cf. V0.8). Sert la fenêtre
+     * « Notifications Android » côté Ubuntu, proche de Microsoft Phone Link.
+     *
+     * Distinct du chemin RCS ([refreshFromActive]/[RcsMessageStore]) : aucune
+     * écriture dans le store, aucune logique provider-first. Filtre le bruit le
+     * plus évident (résumés de groupe, notifications vides) mais ne se limite pas
+     * à Google Messages. Aucune action RemoteInput — strictement en lecture.
+     */
+    fun activeNotificationsSnapshot(): JSONArray {
+        val arr = JSONArray()
+        val actives = try {
+            activeNotifications
+        } catch (e: Exception) {
+            Log.w(TAG, "activeNotificationsSnapshot indisponible: ${e.message}")
+            return arr
+        } ?: return arr
+        for (sbn in actives) {
+            try {
+                notificationToJson(sbn)?.let { arr.put(it) }
+            } catch (e: Exception) {
+                Log.w(TAG, "snapshot notif key=${sbn.key} échouée: ${e.message}")
+            }
+        }
+        return arr
+    }
+
+    private fun notificationToJson(sbn: StatusBarNotification): JSONObject? {
+        val n = sbn.notification ?: return null
+        // Exclure le bruit le plus évident : résumés de groupe et notifications
+        // persistantes/système (en cours). Phone Link n'affiche pas ces lignes.
+        if (n.flags and Notification.FLAG_GROUP_SUMMARY != 0) return null
+        if (n.flags and Notification.FLAG_ONGOING_EVENT != 0) return null
+        val extras = n.extras ?: return null
+        val title = extras.getCharSequence(NotificationCompat.EXTRA_TITLE)?.toString().orEmpty()
+        val text = extras.getCharSequence(NotificationCompat.EXTRA_TEXT)?.toString().orEmpty()
+        val bigText = extras.getCharSequence(NotificationCompat.EXTRA_BIG_TEXT)?.toString().orEmpty()
+        // Rien d'affichable : on ne capture pas de notification vide.
+        if (title.isBlank() && text.isBlank() && bigText.isBlank()) return null
+        val isClearable =
+            n.flags and Notification.FLAG_NO_CLEAR == 0 &&
+                n.flags and Notification.FLAG_ONGOING_EVENT == 0
+        return JSONObject()
+            .put("id", sbn.key)
+            .put("package", sbn.packageName)
+            .put("app_name", appLabel(sbn.packageName))
+            .put("title", title)
+            .put("text", text)
+            .put("big_text", bigText)
+            .put("timestamp", sbn.postTime)
+            .put("is_clearable", isClearable)
+    }
+
+    private fun appLabel(packageName: String): String =
+        try {
+            val pm = packageManager
+            pm.getApplicationLabel(pm.getApplicationInfo(packageName, 0)).toString()
+        } catch (e: Exception) {
+            packageName
+        }
+
     // ---- debug ------------------------------------------------------------
 
     /** Dump JSON des notifications Google Messages actives (champs extraits). */

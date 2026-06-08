@@ -164,6 +164,21 @@ endpoints décrits ici, le contrat JSON et le modèle provider-first SMS/MMS/RCS
 sont strictement inchangés** : seul l'hébergement du serveur change. `RemoteInput`
 / envoi RCS reste hors scope.
 
+## 5.3 V0.8 — endpoints complémentaires (RCS inchangé)
+
+V0.8 ajoute deux endpoints **complémentaires** et protégés, sans toucher au
+modèle provider-first ni au chemin RCS décrit ici :
+
+- `GET /v1/device/status` : batterie + statut téléphone (lecture
+  `Intent.ACTION_BATTERY_CHANGED` / `BatteryManager`) ;
+- `GET /v1/notifications` : snapshot **lecture seule** des notifications
+  Android actives (toutes apps), via
+  `RcsNotificationListener.activeNotificationsSnapshot()`. Ce chemin **n'écrit
+  pas** dans `RcsMessageStore` et n'altère pas `/v1/rcs/messages` ni
+  `/v1/debug/notifications`.
+
+`RemoteInput` / envoi RCS restent **hors scope**.
+
 ## 6. Limites restantes
 
 - Pas d'envoi RCS en V0.6.0.

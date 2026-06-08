@@ -289,6 +289,90 @@ même si `MainActivity` est fermée ou mise en arrière-plan.
 * Comportement des limites de temps des FGS `dataSync` (Android 15+) non
   éprouvé ; sans objet en targetSdk 34.
 
+## V0.8 — Batterie / statut téléphone + notifications Android (en cours)
+
+Branche : `feat/v0.8-device-status-notifications`.
+
+### Objectif
+
+Ajouter deux fonctionnalités complémentaires, sans toucher au modèle
+provider-first SMS/MMS/RCS ni au Foreground Service V0.7 :
+
+1. batterie + statut téléphone affichés côté GTK ;
+2. fenêtre « Notifications Android » en lecture seule (proche de Microsoft
+   Phone Link).
+
+### Endpoints ajoutés (Android, token requis)
+
+- `GET /v1/device/status` →
+  `{ battery_level, battery_charging, battery_status, device, server_running,
+  sms_permission, notification_access, default_sms_app, api_version }`.
+  Batterie lue via le sticky broadcast `Intent.ACTION_BATTERY_CHANGED` /
+  `BatteryManager` (API standard, **aucune dépendance ajoutée**). Les autres
+  champs réutilisent `SmsRepository` / `RcsNotificationListener` /
+  `CompanionForegroundService.isRunning`.
+- `GET /v1/notifications` →
+  `{ notifications: [ {id, package, app_name, title, text, big_text,
+  timestamp, is_clearable} ] }`. Source : `getActiveNotifications()` via une
+  nouvelle méthode `RcsNotificationListener.activeNotificationsSnapshot()`
+  (toutes apps, pas seulement Google Messages). Filtre le bruit évident
+  (résumés de groupe `FLAG_GROUP_SUMMARY`, notifications en cours
+  `FLAG_ONGOING_EVENT`, notifications vides). Si le listener n'est pas
+  connecté : `{ "status": "listener_not_connected", "notifications": [] }` avec
+  **HTTP 200**.
+
+### Ce qui change (Android)
+
+- `CompanionServer.kt` : deux routes `GET /v1/device/status` et
+  `GET /v1/notifications` (guarded), helper batterie privé `batteryInfo()`.
+  `/v1/health` et tous les endpoints V0.6/V0.7 **inchangés**.
+- `RcsNotificationListener.kt` : ajout de `activeNotificationsSnapshot()` +
+  helpers `notificationToJson()` / `appLabel()`. **Aucune** écriture dans
+  `RcsMessageStore`, **aucune** logique provider-first touchée, **aucun**
+  `RemoteInput`. Le chemin RCS (`refreshFromActive` / `debugDump`) est
+  inchangé.
+- `versionName` 0.7.0 → 0.8.0, `versionCode` 4 → 5.
+
+### Ce qui change (Ubuntu/Python + GTK)
+
+- `app/core/android_bridge.py` : dataclasses `DeviceStatus` et
+  `AndroidNotification` ; méthodes `get_device_status()` (ne lève jamais →
+  `reachable=False` si indisponible) et `list_notifications()` (lève
+  `BridgeError` sur erreur de transport pour que l'UI affiche un message
+  clair ; `[]` en mock ou si `listener_not_connected`) ; parsing + fonctions de
+  commodité au niveau module.
+- `app/ui/main_window.py` : groupe « Téléphone Android » (batterie %, charge,
+  serveur Android, SMS, notifications), alimenté par `get_device_status()` dans
+  le thread de rafraîchissement existant (`_fetch_status` → `GLib.idle_add` →
+  `_apply_device_status`). Action « Notifications Android » qui ouvre la
+  nouvelle fenêtre.
+- `app/ui/notifications_window.py` (**nouveau**) : fenêtre GTK lecture seule,
+  bouton Rafraîchir, chargement en thread + `GLib.idle_add`, message clair si
+  vide ou téléphone non connecté. Pas de bouton répondre, pas de `RemoteInput`.
+
+### Ce qui ne change PAS (garanti)
+
+- `/v1/health` et endpoints V0.6/V0.7 strictement identiques.
+- Modèle provider-first SMS/MMS/RCS **inchangé** ; lecture SMS/MMS/RCS
+  intacte ; envoi SMS classique non touché.
+- Foreground Service V0.7 reste le mode de fonctionnement du serveur Android.
+- `RemoteInput` / envoi RCS toujours **hors scope**.
+
+### Tests effectués
+
+- `python3 -m py_compile` sur `android_bridge.py`, `sms.py`, `main_window.py`,
+  `notifications_window.py` : OK.
+- `assembleDebug` : **BUILD SUCCESSFUL**, APK debug (~5,7 Mo).
+- `git diff --check` : OK.
+
+### Limites restantes V0.8
+
+- `/v1/notifications` ne renvoie pas les icônes/images des notifications.
+- Le snapshot est un instantané live (`getActiveNotifications()`) : pas
+  d'historique des notifications déjà balayées.
+- Tests terrain (APK 0.8.0 installée, `curl` des deux endpoints, affichage
+  GTK) à valider sur le téléphone.
+
 ## Architecture actuelle
 
 Android

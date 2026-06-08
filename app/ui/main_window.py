@@ -20,9 +20,11 @@ from app.core import adb as adb_core
 from app.core import scrcpy as scrcpy_core
 from app.core import photos as photos_core
 from app.core import system_checks
+from app.core import android_bridge
 from app.core.config import PhoneLinkConfig, load_config, save_config
 from app.ui.gallery_window import GalleryWindow
 from app.ui.sms_window import SmsWindow
+from app.ui.notifications_window import NotificationsWindow
 from app.ui.widgets import show_dialog
 from app.utils.commands import launch_background, is_installed
 from app.utils.logger import get_logger
@@ -57,6 +59,13 @@ class MainWindow(_Base):
         self._val_sink: Optional[Gtk.Label] = None
         self._val_adb: Optional[Gtk.Label] = None
         self._val_scrcpy: Optional[Gtk.Label] = None
+
+        # Phone status labels (V0.8 — battery + device status)
+        self._val_battery: Optional[Gtk.Label] = None
+        self._val_charging: Optional[Gtk.Label] = None
+        self._val_server: Optional[Gtk.Label] = None
+        self._val_sms: Optional[Gtk.Label] = None
+        self._val_notif: Optional[Gtk.Label] = None
 
         # ADB Wi-Fi host entry (set during _build_ui)
         self._wifi_host_entry: Optional[Gtk.Entry] = None
@@ -103,6 +112,18 @@ class MainWindow(_Base):
         self._val_adb     = self._adw_status_row(status_group, "ADB",             "…")
         self._val_scrcpy  = self._adw_status_row(status_group, "scrcpy",          "…")
 
+        # ── Phone (Android) group — V0.8 ──
+        phone_group = Adw.PreferencesGroup()
+        phone_group.set_title("Téléphone Android")
+        phone_group.set_description("Via l'app compagnon (appairage requis)")
+        page.add(phone_group)
+
+        self._val_battery  = self._adw_status_row(phone_group, "Batterie",          "—")
+        self._val_charging = self._adw_status_row(phone_group, "Charge",            "—")
+        self._val_server   = self._adw_status_row(phone_group, "Serveur Android",   "—")
+        self._val_sms      = self._adw_status_row(phone_group, "SMS",               "—")
+        self._val_notif    = self._adw_status_row(phone_group, "Notifications",     "—")
+
         # ── Actions group ──
         actions_group = Adw.PreferencesGroup()
         actions_group.set_title("Actions")
@@ -116,6 +137,7 @@ class MainWindow(_Base):
             ("Mode appel — guide",          "phone-symbolic",                      self._on_call_mode),
             ("Afficher téléphone (scrcpy)", "video-display-symbolic",              self._on_scrcpy),
             ("Messages (SMS)",              "user-available-symbolic",             self._on_open_sms),
+            ("Notifications Android",       "preferences-system-notifications-symbolic", self._on_open_notifications),
             ("Importer photos",             "camera-photo-symbolic",               self._on_import_photos),
             ("Galerie photos",              "image-x-generic-symbolic",            self._on_open_gallery),
             ("Ouvrir dossier photos",       "folder-pictures-symbolic",            self._on_open_photos),
@@ -220,6 +242,12 @@ class MainWindow(_Base):
             ("Sortie audio",   "…"),
             ("ADB",            "…"),
             ("scrcpy",         "…"),
+            # V0.8 — batterie + statut téléphone Android
+            ("Batterie",       "—"),
+            ("Charge",         "—"),
+            ("Serveur Android","—"),
+            ("SMS",            "—"),
+            ("Notifications",  "—"),
         ]
         val_refs: list[Gtk.Label] = []
         for i, (key, val) in enumerate(rows):
@@ -236,7 +264,9 @@ class MainWindow(_Base):
 
         (self._val_phone, self._val_bt, self._val_profile,
          self._val_source, self._val_sink,
-         self._val_adb, self._val_scrcpy) = val_refs
+         self._val_adb, self._val_scrcpy,
+         self._val_battery, self._val_charging, self._val_server,
+         self._val_sms, self._val_notif) = val_refs
 
         sep = Gtk.Separator()
         sep.set_margin_top(12)
@@ -256,6 +286,7 @@ class MainWindow(_Base):
             ("Mode appel — guide",          self._on_call_mode),
             ("Afficher téléphone (scrcpy)", self._on_scrcpy),
             ("Messages (SMS)",              self._on_open_sms),
+            ("Notifications Android",       self._on_open_notifications),
             ("Importer photos",             self._on_import_photos),
             ("Galerie photos",              self._on_open_gallery),
             ("Ouvrir dossier photos",       self._on_open_photos),
@@ -326,11 +357,15 @@ class MainWindow(_Base):
         adb_ok   = adb_core.is_device_connected()
         scrcpy_ok = scrcpy_core.is_scrcpy_installed()
 
+        # V0.8 — batterie + statut téléphone via l'app compagnon. Ne lève jamais
+        # (renvoie reachable=False si indisponible) : l'UI ne doit pas planter.
+        device = android_bridge.get_device_status()
+
         GLib.idle_add(
             self._apply_status,
             phone_name, bt_connected, mac,
             _fmt_profile(profile_raw),
-            source, sink, adb_ok, scrcpy_ok,
+            source, sink, adb_ok, scrcpy_ok, device,
         )
 
     def _apply_status(
@@ -343,6 +378,7 @@ class MainWindow(_Base):
         sink: str,
         adb_ok: bool,
         scrcpy_ok: bool,
+        device: "android_bridge.DeviceStatus",
     ):
         """Apply fetched data to UI labels (must run on GTK main thread)."""
         self._phone_mac = mac
@@ -363,6 +399,33 @@ class MainWindow(_Base):
         _set_status_label(self._val_scrcpy,
                           "Installé ✓" if scrcpy_ok else "Non installé",
                           ok=scrcpy_ok)
+        self._apply_device_status(device)
+
+    def _apply_device_status(self, device: "android_bridge.DeviceStatus") -> None:
+        """Apply phone battery/status to UI labels (V0.8). Never crashes."""
+        if not device.reachable:
+            for lbl in (self._val_battery, self._val_charging,
+                        self._val_sms, self._val_notif):
+                _set_status_label(lbl, "—", ok=None)
+            _set_status_label(self._val_server, "Indisponible", ok=False)
+            return
+
+        if device.battery_level >= 0:
+            _set_status_label(self._val_battery, f"{device.battery_level} %", ok=None)
+        else:
+            _set_status_label(self._val_battery, "Inconnu", ok=None)
+        _set_status_label(self._val_charging,
+                          "Oui ✓" if device.battery_charging else "Non",
+                          ok=device.battery_charging or None)
+        _set_status_label(self._val_server,
+                          "OK ✓" if device.server_running else "Indisponible",
+                          ok=device.server_running)
+        _set_status_label(self._val_sms,
+                          "OK ✓" if device.sms_permission else "Non",
+                          ok=device.sms_permission)
+        _set_status_label(self._val_notif,
+                          "OK ✓" if device.notification_access else "Non",
+                          ok=device.notification_access)
 
     # ──────────────────────────────────────────────
     # Action handlers
@@ -458,6 +521,10 @@ class MainWindow(_Base):
     def _on_open_sms(self, _):
         sms = SmsWindow(parent=self)
         sms.present()
+
+    def _on_open_notifications(self, _):
+        notifications = NotificationsWindow(parent=self)
+        notifications.present()
 
     def _on_open_photos(self, _):
         ok, msg = photos_core.open_local_folder()

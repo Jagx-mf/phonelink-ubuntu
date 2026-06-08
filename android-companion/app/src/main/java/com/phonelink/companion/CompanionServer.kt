@@ -1,6 +1,9 @@
 package com.phonelink.companion
 
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.BatteryManager
 import fi.iki.elonen.NanoHTTPD
 import org.json.JSONArray
 import org.json.JSONObject
@@ -15,6 +18,8 @@ import org.json.JSONObject
  *  - `GET  /messages`      token requis
  *  - `POST /send`          token requis (envoi réel via SmsManager)
  *  - `GET  /rcs/messages`  token requis (RCS captés via notifications)
+ *  - `GET  /device/status` token requis (batterie + statut téléphone, V0.8)
+ *  - `GET  /notifications`  token requis (snapshot notifications actives, V0.8)
  *  - `GET  /debug/notifications` token requis (diagnostic notifications)
  *  - `GET  /debug/sms-provider` token requis (diagnostic providers SMS/MMS)
  *  - `GET  /debug/mms-parts` token requis (diagnostic parts MMS)
@@ -61,6 +66,10 @@ class CompanionServer(
                 guarded(session) { send(session) }
             method == Method.GET && uri == "/v1/rcs/messages" ->
                 guarded(session) { rcsMessages() }
+            method == Method.GET && uri == "/v1/device/status" ->
+                guarded(session) { deviceStatus() }
+            method == Method.GET && uri == "/v1/notifications" ->
+                guarded(session) { notifications() }
             method == Method.GET && uri == "/v1/debug/notifications" ->
                 guarded(session) { debugNotifications() }
             method == Method.GET && uri == "/v1/debug/sms-provider" ->
@@ -157,6 +166,73 @@ class CompanionServer(
     private fun rcsMessages(): Response {
         RcsNotificationListener.instance?.refreshFromActive()
         return json(Response.Status.OK, RcsMessageStore.snapshot())
+    }
+
+    /**
+     * V0.8 — batterie + statut téléphone. N'ajoute aucune dépendance : la
+     * batterie est lue via le sticky broadcast [Intent.ACTION_BATTERY_CHANGED]
+     * (API standard) et les autres champs réutilisent les helpers existants
+     * ([SmsRepository], [RcsNotificationListener]). `/v1/health` reste inchangé.
+     */
+    private fun deviceStatus(): Response {
+        val battery = batteryInfo()
+        val body = JSONObject()
+            .put("battery_level", battery.level)
+            .put("battery_charging", battery.charging)
+            .put("battery_status", battery.status)
+            .put("device", deviceName)
+            .put("server_running", CompanionForegroundService.isRunning)
+            .put("sms_permission", SmsRepository.hasReadSms(context) && SmsRepository.hasSendSms(context))
+            .put("notification_access", RcsNotificationListener.hasAccess(context))
+            .put("default_sms_app", SmsRepository.isDefaultSmsApp(context))
+            .put("api_version", "v1")
+        return json(Response.Status.OK, body)
+    }
+
+    private data class BatteryInfo(val level: Int, val charging: Boolean, val status: String)
+
+    /** Lit l'état batterie depuis le sticky broadcast ACTION_BATTERY_CHANGED. */
+    private fun batteryInfo(): BatteryInfo {
+        val intent = try {
+            context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        } catch (e: Exception) {
+            null
+        }
+        val level = intent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+        val scale = intent?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+        val pct = if (level >= 0 && scale > 0) level * 100 / scale else -1
+        val statusRaw = intent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
+        val charging = statusRaw == BatteryManager.BATTERY_STATUS_CHARGING ||
+            statusRaw == BatteryManager.BATTERY_STATUS_FULL
+        val status = when (statusRaw) {
+            BatteryManager.BATTERY_STATUS_CHARGING -> "charging"
+            BatteryManager.BATTERY_STATUS_DISCHARGING -> "discharging"
+            BatteryManager.BATTERY_STATUS_FULL -> "full"
+            BatteryManager.BATTERY_STATUS_NOT_CHARGING -> "not_charging"
+            else -> "unknown"
+        }
+        return BatteryInfo(pct, charging, status)
+    }
+
+    /**
+     * V0.8 — snapshot lecture seule des notifications Android actives (toutes
+     * applications), via [RcsNotificationListener]. Si le listener n'est pas
+     * connecté, renvoie `{ "status": "listener_not_connected", "notifications":
+     * [] }` avec HTTP 200 (pas d'erreur serveur). Lecture seule : aucune action
+     * RemoteInput. N'impacte pas `/v1/rcs/messages` ni `/v1/debug/notifications`.
+     */
+    private fun notifications(): Response {
+        val listener = RcsNotificationListener.instance
+            ?: return json(
+                Response.Status.OK,
+                JSONObject()
+                    .put("status", "listener_not_connected")
+                    .put("notifications", JSONArray()),
+            )
+        return json(
+            Response.Status.OK,
+            JSONObject().put("notifications", listener.activeNotificationsSnapshot()),
+        )
     }
 
     private fun debugNotifications(): Response {

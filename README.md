@@ -84,6 +84,33 @@ python main.py
 - Limites restantes : PIN/token en mémoire (à persister plus tard), test de
   redémarrage complet du téléphone à valider sur le terrain.
 
+## V0.8 — Batterie / statut téléphone + notifications Android (en cours)
+
+- Deux nouveaux endpoints **protégés** (token requis) côté Android Companion :
+  - `GET /v1/device/status` : batterie (`battery_level`, `battery_charging`,
+    `battery_status`), modèle (`device`), `server_running`, `sms_permission`,
+    `notification_access`, `default_sms_app`. Lecture batterie via l'API
+    standard `Intent.ACTION_BATTERY_CHANGED` / `BatteryManager` — aucune
+    dépendance ajoutée.
+  - `GET /v1/notifications` : snapshot **lecture seule** des notifications
+    Android actives (`getActiveNotifications()` via le `NotificationListener`).
+    Si le listener n'est pas connecté : `{ "status": "listener_not_connected",
+    "notifications": [] }` avec HTTP 200.
+- Côté GTK :
+  - section **« Téléphone Android »** dans l'écran principal : batterie %,
+    charge oui/non, serveur Android OK/indisponible, SMS OK/non, Notifications
+    OK/non — rafraîchie par le bouton de rafraîchissement existant ;
+  - fenêtre **« Notifications Android »** (lecture seule) : liste application /
+    titre / texte / heure, bouton Rafraîchir, message clair si vide ou
+    téléphone non connecté. Aucune réponse, aucun `RemoteInput`.
+- `/v1/health` reste **inchangé** (compatibilité). Les endpoints V0.6/V0.7
+  (`/v1/conversations`, `/v1/messages`, `/v1/send`, `/v1/rcs/messages`,
+  `/v1/debug/*`) sont **inchangés**.
+- Le modèle provider-first SMS/MMS/RCS reste inchangé ; le serveur Android
+  reste hébergé par le Foreground Service V0.7. `RemoteInput` / envoi RCS
+  restent **hors scope**.
+- `versionName` 0.7.0 → 0.8.0, `versionCode` 4 → 5.
+
 ## Structure du projet
 
 ```

@@ -133,6 +133,45 @@ au redémarrage `START_STICKY`), persistance à ajouter plus tard ; test de
 redémarrage complet du téléphone avec serveur survivant en arrière-plan à
 valider sur le terrain.
 
+## État projet — V0.8 — batterie/statut téléphone + notifications Android (en cours)
+
+Branche : `feat/v0.8-device-status-notifications`.
+
+Objectif : deux fonctionnalités complémentaires, sans casser la lecture
+SMS/MMS/RCS ni le modèle provider-first, sans `RemoteInput`, sans envoi RCS.
+
+Endpoints ajoutés (Android, token requis) :
+
+- `GET /v1/device/status` : batterie (`battery_level`, `battery_charging`,
+  `battery_status`) lue via `Intent.ACTION_BATTERY_CHANGED` / `BatteryManager`
+  (API standard, aucune dépendance), + `device`, `server_running`,
+  `sms_permission`, `notification_access`, `default_sms_app`, `api_version`.
+- `GET /v1/notifications` : snapshot lecture seule des notifications actives
+  (toutes apps) via `RcsNotificationListener.activeNotificationsSnapshot()` ;
+  filtre les résumés de groupe, notifications en cours et vides ; renvoie
+  `{ status: "listener_not_connected", notifications: [] }` (HTTP 200) si le
+  listener n'est pas connecté.
+
+Changements :
+
+- Android : `CompanionServer.kt` (2 routes guarded + helper batterie),
+  `RcsNotificationListener.kt` (snapshot lecture seule, aucune écriture store),
+  `versionName` 0.7.0 → 0.8.0, `versionCode` 4 → 5.
+- Python : `android_bridge.py` (dataclasses `DeviceStatus` /
+  `AndroidNotification`, `get_device_status()` qui ne lève jamais,
+  `list_notifications()`).
+- GTK : `main_window.py` (section « Téléphone Android » + action «
+  Notifications Android », alimentées par le thread de refresh existant),
+  nouveau `app/ui/notifications_window.py` (fenêtre lecture seule).
+
+Inchangé : `/v1/health` et endpoints V0.6/V0.7, modèle provider-first
+SMS/MMS/RCS, envoi SMS classique, Foreground Service V0.7. `RemoteInput` /
+envoi RCS hors scope.
+
+Tests : `py_compile` OK (4 fichiers .py), `assembleDebug` BUILD SUCCESSFUL (APK
+debug ~5,7 Mo), `git diff --check` OK. Tests terrain (APK 0.8.0 + curl + GTK) à
+valider.
+
 Les sections ci-dessous restent l'analyse historique initiale du dépôt en V0.1.
 
 ## Synthèse

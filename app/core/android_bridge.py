@@ -119,6 +119,43 @@ class RcsThread:
 
 
 @dataclass(frozen=True)
+class DeviceStatus:
+    """État du téléphone renvoyé par ``GET /device/status`` (V0.8).
+
+    ``reachable`` est faux si l'endpoint est indisponible (mode mock, téléphone
+    non connecté, token invalide…) : l'UI peut alors afficher un statut neutre
+    sans planter. ``battery_level`` vaut ``-1`` quand le niveau est inconnu.
+    """
+    reachable: bool
+    battery_level: int = -1
+    battery_charging: bool = False
+    battery_status: str = ""
+    device: str = ""
+    server_running: bool = False
+    sms_permission: bool = False
+    notification_access: bool = False
+    default_sms_app: bool = False
+    detail: str = ""
+
+
+@dataclass(frozen=True)
+class AndroidNotification:
+    """Une notification Android active renvoyée par ``GET /notifications`` (V0.8).
+
+    Lecture seule, proche de Microsoft Phone Link : aucune réponse ni action
+    ``RemoteInput``.
+    """
+    id: str
+    package: str
+    app_name: str
+    title: str
+    text: str
+    big_text: str
+    timestamp: Optional[datetime]
+    is_clearable: bool
+
+
+@dataclass(frozen=True)
 class BridgeConversation:
     """Résumé de conversation renvoyé par ``GET /conversations``."""
     id: str
@@ -234,6 +271,39 @@ class AndroidBridge:
             logger.warning("android_bridge: /rcs/messages indisponible: %s", exc)
             return []
         return [_parse_rcs_thread(t) for t in data.get("conversations", [])]
+
+    def get_device_status(self) -> DeviceStatus:
+        """Lire batterie + statut téléphone (``GET /device/status``, V0.8).
+
+        Ne lève **jamais** : en mode mock ou si l'endpoint est indisponible
+        (téléphone déconnecté, token invalide, version Android sans cet
+        endpoint…), renvoie ``DeviceStatus(reachable=False, …)`` pour que l'UI
+        reste affichable.
+        """
+        if self.mode is BridgeMode.MOCK:
+            return DeviceStatus(
+                reachable=False,
+                detail="Mode démo — aucune app compagnon Android connectée",
+            )
+        try:
+            data = self._request("GET", "/device/status")
+        except BridgeError as exc:
+            logger.warning("android_bridge: /device/status indisponible: %s", exc)
+            return DeviceStatus(reachable=False, detail=str(exc))
+        return _parse_device_status(data)
+
+    def list_notifications(self) -> list[AndroidNotification]:
+        """Lister les notifications Android actives (``GET /notifications``, V0.8).
+
+        Lecture seule. En mode mock, renvoie une liste vide. En HTTP, lève
+        :class:`BridgeError` sur erreur de transport (l'UI affiche alors un
+        message clair) ; une réponse ``listener_not_connected`` donne une liste
+        vide. Aucune action ``RemoteInput``.
+        """
+        if self.mode is BridgeMode.MOCK:
+            return []
+        data = self._request("GET", "/notifications")
+        return [_parse_notification(n) for n in data.get("notifications", [])]
 
     def send_message(
         self,
@@ -456,6 +526,38 @@ def _parse_rcs_thread(raw: dict) -> RcsThread:
         id=str(raw.get("id", "")),
         contact_name=str(raw.get("contact_name", "")),
         messages=[_parse_message(m) for m in raw.get("messages", [])],
+    )
+
+
+def _parse_device_status(raw: dict) -> DeviceStatus:
+    try:
+        level = int(raw.get("battery_level", -1))
+    except (ValueError, TypeError):
+        level = -1
+    return DeviceStatus(
+        reachable=True,
+        battery_level=level,
+        battery_charging=bool(raw.get("battery_charging", False)),
+        battery_status=str(raw.get("battery_status", "")),
+        device=str(raw.get("device", "")),
+        server_running=bool(raw.get("server_running", False)),
+        sms_permission=bool(raw.get("sms_permission", False)),
+        notification_access=bool(raw.get("notification_access", False)),
+        default_sms_app=bool(raw.get("default_sms_app", False)),
+        detail="Connecté",
+    )
+
+
+def _parse_notification(raw: dict) -> AndroidNotification:
+    return AndroidNotification(
+        id=str(raw.get("id", "")),
+        package=str(raw.get("package", "")),
+        app_name=str(raw.get("app_name", "")),
+        title=str(raw.get("title", "")),
+        text=str(raw.get("text", "")),
+        big_text=str(raw.get("big_text", "")),
+        timestamp=_epoch_ms_to_dt(raw.get("timestamp")),
+        is_clearable=bool(raw.get("is_clearable", True)),
     )
 
 
@@ -708,6 +810,14 @@ def list_messages(conversation_id: str) -> list[BridgeMessage]:
 
 def list_rcs() -> list[RcsThread]:
     return get_bridge().list_rcs()
+
+
+def get_device_status() -> DeviceStatus:
+    return get_bridge().get_device_status()
+
+
+def list_notifications() -> list[AndroidNotification]:
+    return get_bridge().list_notifications()
 
 
 def send_message(

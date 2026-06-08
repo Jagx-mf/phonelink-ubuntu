@@ -11,8 +11,8 @@ android {
         applicationId = "com.phonelink.companion"
         minSdk = 24          // Android 7.0 — couvre la grande majorité des appareils
         targetSdk = 34
-        versionCode = 4
-        versionName = "0.7.0"
+        versionCode = 5
+        versionName = "0.8.0"
     }
 
     buildTypes {
