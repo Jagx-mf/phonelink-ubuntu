@@ -467,6 +467,116 @@ Hors scope : `RemoteInput`, envoi RCS.
 
 `versionName` 0.8.0 → 0.9.0, `versionCode` 5 → 6.
 
+## Phase temps réel — validation terrain
+
+**Date de validation : 2026-06-08.**
+
+### Composants Android ajoutés
+
+- `EventBus.kt` : file d'événements **en mémoire**, bornée (256), long polling
+  (`wait/notify`), timeout borné 1–30 s (défaut 25 000 ms).
+- `CompanionServer.kt` : route `GET /v1/events` (token requis).
+- `CompanionForegroundService.kt` : `ContentObserver` sur `content://sms`,
+  `content://mms`, `content://mms-sms` (débounce 800 ms) → `sms_changed` ;
+  receiver `ACTION_POWER_CONNECTED/DISCONNECTED` → `device_status_changed`.
+  Tout est best-effort (échecs avalés, jamais de crash du service).
+- `RcsNotificationListener.kt` : `notification_changed` sur
+  `onNotificationPosted` / `onNotificationRemoved` (toutes apps sauf la
+  notification du service) ; `sms_changed` quand un message RCS est capté.
+- `SmsRepository.kt` : champ `last_outgoing` ajouté au résumé
+  `/v1/conversations` (direction du dernier message).
+
+### Composants Ubuntu ajoutés
+
+- `app/core/android_bridge.py` : dataclass `BridgeEvent`, `list_events(since,
+  timeout_ms)`, `is_realtime_available()`, constantes `EVENT_*`, parsing
+  `last_outgoing`, timeout réseau spécifique pour le long polling.
+- `app/core/event_listener.py` (**nouveau**) : `AndroidEventListener` (thread
+  long polling, backoff réseau, arrêt propre, token invalide géré sans spam) ;
+  `DesktopNotifier` (notification bureau).
+- `app/ui/main_window.py` : bouton **« Appairer Android Companion »**, routage
+  des événements vers les fenêtres Messages/Notifications, notifications bureau.
+- `app/ui/sms_window.py` : `refresh_realtime()` (préserve sélection + saisie),
+  `reload_backend()`.
+- `app/ui/notifications_window.py` : `reload_async()`.
+
+### Endpoints ajoutés
+
+- `GET /v1/events?since=<id>&timeout_ms=<ms>` (token requis) :
+  `{ "events": [ {id, type, timestamp, payload?} ], "last_event_id": N }`.
+- `last_outgoing` ajouté à `GET /v1/conversations` (rétro-compatible).
+
+### Fonctionnement général
+
+Android pousse des événements légers dans `EventBus` ; Ubuntu fait du long
+polling sur `/v1/events` (thread dédié) et, à réception, recharge les fenêtres
+concernées + affiche une **notification bureau**. La délivrance bureau passe par
+`notify-send` (vérifié via `shutil.which`, lancé sans `shell=True`), avec repli
+`Gio.Notification` — car `Gtk.Application.send_notification` est silencieusement
+ignoré par GNOME sans fichier `.desktop` correspondant. Les boutons Rafraîchir
+manuels restent disponibles en fallback. Aucune notification pour les messages
+**sortants** ni pour l'**historique au lancement** (priming).
+
+### Tests terrain validés (2026-06-08)
+
+- appairage depuis la fenêtre principale : **OK** ;
+- SMS entrant visible en temps réel dans PhoneLink : **OK** ;
+- notifications Android visibles en temps réel dans la fenêtre Notifications
+  Android : **OK** ;
+- notification bureau Ubuntu « PhoneLink Ubuntu » : **OK** ;
+- `notify-send` fonctionne ;
+- KDE Connect **n'est plus nécessaire** pour les notifications bureau ;
+- envoi SMS classique **non cassé**.
+
+### Limites restantes
+
+- `RemoteInput` RCS toujours **hors scope** ; envoi RCS **non implémenté** ;
+- événements **en mémoire** côté Android (perdus au redémarrage du service →
+  resynchro via `since=-1`) ;
+- persistance **token/PIN** encore améliorable (en mémoire, régénérés au
+  redémarrage) ;
+- arrêt du thread d'écoute jusqu'à ~35 s (requête en cours) — thread *daemon* ;
+- **connexion sans câble** pas encore finalisée (`adb forward` requis) ;
+- **design final** repoussé après validation fonctionnelle.
+
+## Roadmap — prochaines phases
+
+### Phase 1 — Explorateur de fichiers Android
+
+Objectif : naviguer dans les fichiers du téléphone depuis Ubuntu.
+- afficher les dossiers Android (type « Mes fichiers ») ;
+- naviguer dans `DCIM`, `Download`, `Pictures`, `Movies`, `Documents` selon
+  permissions ;
+- copier un fichier téléphone → Ubuntu et Ubuntu → téléphone ;
+- déplacer / renommer / supprimer si raisonnable et sûr ;
+- privilégier une API Companion propre, ADB en fallback éventuel ;
+- ne pas casser l'import photos existant.
+
+### Phase 2 — Contacts
+
+Objectif : bouton « Contacts » dans l'application Ubuntu.
+- afficher les contacts Android + barre de recherche + fiche simple ;
+- envoyer un SMS à un contact ; lancer un appel si possible ;
+- préparer l'intégration future audio Bluetooth/HFP ;
+- `READ_CONTACTS` côté Android ; ne pas refondre le module SMS.
+
+### Phase 3 — Connexion sans câble
+
+Objectif : ne plus dépendre du câble USB.
+- connexion **Wi-Fi prioritaire** (découverte réseau local, appairage, serveur
+  joignable sans `adb forward`, config IP/port côté Ubuntu, reconnexion auto) ;
+- Bluetooth en complément si possible ;
+- garder ADB USB en fallback ; documenter les limites Android/réseau local.
+
+### Phase 4 — Design / UX finale
+
+Objectif : moderniser l'interface une fois les fonctions principales fiables.
+- interface modernisée, meilleure page d'accueil, cartes
+  téléphone/statut/messages/notifications, icônes, thème cohérent ;
+- meilleures fenêtres Messages et Notifications, meilleure navigation ;
+- captures d'écran dans le README ; préparation d'une version installable ;
+- **repoussée après validation fonctionnelle.**
+
 ## Commandes utiles
 
 adb devices
@@ -484,7 +594,27 @@ curl -X POST http://127.0.0.1:8765/v1/pair
 
 ## Dernière validation
 
-Date : 2026-06-05
+Date : 2026-06-08
+
+Validation V0.9 — phase temps réel + appairage depuis l'accueil :
+
+Android Companion (Foreground Service)
+→ EventBus (file en mémoire)
+→ /v1/events (long polling)
+→ android_bridge.list_events
+→ event_listener.AndroidEventListener
+→ GTK (Messages / Notifications rafraîchis sans clic)
+→ DesktopNotifier (notify-send → notification bureau « PhoneLink Ubuntu »)
+
+Statut :
+V0.9 validée terrain (2026-06-08).
+SMS/MMS/RCS et notifications Android en temps réel, notification bureau OK via
+notify-send (KDE Connect plus nécessaire), appairage depuis la fenêtre
+principale OK, envoi SMS classique non cassé.
+Reste hors scope : RemoteInput / envoi RCS. Événements en mémoire côté Android ;
+token/PIN en mémoire ; connexion sans câble et design final à venir (roadmap).
+
+---
 
 Validation V0.6 — modèle provider-first + dédup SMS/MMS/RCS :
 

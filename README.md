@@ -111,7 +111,7 @@ python main.py
   restent **hors scope**.
 - `versionName` 0.7.0 → 0.8.0, `versionCode` 4 → 5.
 
-## V0.9 — Temps réel + appairage depuis l'accueil (en cours)
+## V0.9 — Temps réel + appairage depuis l'accueil (validé terrain — 2026-06-08)
 
 Objectif : plus besoin de cliquer sur **Rafraîchir** pour voir un nouveau
 SMS/MMS/RCS ou une nouvelle notification, et appairage accessible directement
@@ -158,6 +158,82 @@ depuis la fenêtre principale.
 - Les **boutons Rafraîchir** manuels restent en place (fallback). Les endpoints
   existants et le modèle provider-first sont **inchangés**. `RemoteInput` et
   envoi RCS restent **hors scope**.
+
+### Phase temps réel — validation terrain
+
+**Date de validation : 2026-06-08.**
+
+Composants Android ajoutés :
+- `EventBus.kt` — file d'événements **en mémoire**, bornée, avec long polling
+  (`wait/notify`) ;
+- route `GET /v1/events` dans `CompanionServer.kt` ;
+- `ContentObserver` SMS/MMS (`content://sms`, `content://mms`,
+  `content://mms-sms`) + receiver batterie dans `CompanionForegroundService` ;
+- `notification_changed` émis depuis `RcsNotificationListener` (posted/removed) ;
+- `last_outgoing` ajouté au résumé `SmsRepository.conversations`.
+
+Composants Ubuntu ajoutés :
+- `BridgeEvent` + `list_events()` + `is_realtime_available()` dans
+  `app/core/android_bridge.py` ;
+- `app/core/event_listener.py` : `AndroidEventListener` (long polling) +
+  `DesktopNotifier` (notification bureau) ;
+- bouton **« Appairer Android Companion »** et orchestration temps réel dans
+  `app/ui/main_window.py` ;
+- `refresh_realtime()` dans `app/ui/sms_window.py`, `reload_async()` dans
+  `app/ui/notifications_window.py`.
+
+Endpoints ajoutés :
+- `GET /v1/events?since=<id>&timeout_ms=<ms>` (token requis) ;
+- champ `last_outgoing` ajouté à `GET /v1/conversations` (rétro-compatible).
+
+Fonctionnement général : Android pousse des événements légers dans `EventBus`
+(NotificationListener, ContentObserver SMS/MMS, receiver batterie) ; Ubuntu fait
+du **long polling** sur `/v1/events` dans un thread dédié, ce qui déclenche le
+rechargement des fenêtres Messages / Notifications et l'affichage d'une
+**notification bureau** (`notify-send`, repli `Gio.Notification`). Les SMS/MMS/RCS
+et les notifications Android apparaissent **sans clic sur Rafraîchir**.
+
+Tests terrain validés (2026-06-08) :
+- appairage depuis la fenêtre principale : **OK** ;
+- SMS entrant visible en temps réel : **OK** ;
+- notifications Android visibles en temps réel : **OK** ;
+- notification bureau Ubuntu « PhoneLink Ubuntu » via `notify-send` : **OK** ;
+- KDE Connect **n'est plus nécessaire** pour les notifications bureau ;
+- envoi SMS classique **non cassé**.
+
+Limites restantes :
+- `RemoteInput` RCS toujours **hors scope** ;
+- envoi RCS **non implémenté** ;
+- événements **en mémoire** côté Android (perdus au redémarrage du service →
+  resynchro automatique via `since=-1`) ;
+- persistance **token/PIN** encore améliorable (en mémoire, régénérés au
+  redémarrage du service) ;
+- l'arrêt du thread d'écoute peut prendre jusqu'à ~35 s (requête long polling en
+  cours) — thread *daemon*, sans impact à la fermeture ;
+- **connexion sans câble** pas encore finalisée (`adb forward` requis) ;
+- **design final** repoussé après validation fonctionnelle.
+
+## Roadmap — prochaines phases
+
+Détail complet : [docs/roadmap.md](docs/roadmap.md).
+
+**Phase 1 — Explorateur de fichiers Android.** Naviguer dans les fichiers du
+téléphone (DCIM, Download, Pictures, Movies, Documents), copier
+téléphone ↔ Ubuntu, déplacer/renommer/supprimer si sûr. API Companion propre
+privilégiée, ADB en fallback ; l'import photos existant n'est pas cassé.
+
+**Phase 2 — Contacts.** Bouton « Contacts » : liste, recherche, fiche simple,
+envoi SMS à un contact, appel si possible (préparation audio Bluetooth/HFP).
+`READ_CONTACTS` côté Android ; le module SMS n'est pas refondu.
+
+**Phase 3 — Connexion sans câble.** Wi-Fi prioritaire (découverte réseau local,
+appairage, serveur joignable sans `adb forward`, config IP/port côté Ubuntu,
+reconnexion auto), Bluetooth en complément éventuel, ADB USB en fallback.
+
+**Phase 4 — Design / UX finale.** Interface modernisée (cartes
+téléphone/statut/messages/notifications, icônes, thème cohérent), meilleures
+fenêtres Messages et Notifications, captures d'écran dans le README, préparation
+d'une version installable. **Repoussée après fiabilisation fonctionnelle.**
 
 ## Structure du projet
 

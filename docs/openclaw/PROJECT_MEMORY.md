@@ -486,3 +486,40 @@ La V0.2 devrait donc se concentrer sur la fiabilité utilisateur : choisir expli
   rafraîchissements SMS et notifications temps réel.
 - Inchangé : provider-first, endpoints existants. Hors scope : `RemoteInput`,
   envoi RCS.
+
+### Phase temps réel — validation terrain (2026-06-08)
+
+Composants Android : `EventBus.kt` (file en mémoire, long polling), route
+`GET /v1/events`, `ContentObserver` SMS/MMS + receiver batterie
+(`CompanionForegroundService`), `notification_changed` depuis
+`RcsNotificationListener`, `last_outgoing` dans `/v1/conversations`.
+
+Composants Ubuntu : `BridgeEvent` + `list_events()` (`android_bridge.py`),
+`event_listener.py` (`AndroidEventListener` + `DesktopNotifier`), bouton
+« Appairer Android Companion » et orchestration (`main_window.py`),
+`refresh_realtime()` (`sms_window.py`), `reload_async()`
+(`notifications_window.py`).
+
+Endpoint ajouté : `GET /v1/events?since=&timeout_ms=` (+ `last_outgoing` dans
+`/v1/conversations`).
+
+Tests terrain OK : appairage depuis l'accueil, SMS et notifications Android en
+temps réel, notification bureau via `notify-send` (KDE Connect plus nécessaire),
+envoi SMS classique non cassé.
+
+Limites : `RemoteInput`/envoi RCS hors scope ; événements en mémoire côté Android
+(resynchro `since=-1`) ; token/PIN en mémoire ; arrêt du thread d'écoute jusqu'à
+~35 s ; connexion sans câble non finalisée ; design final repoussé.
+
+### Roadmap — prochaines phases (détail : docs/roadmap.md)
+
+1. **Explorateur de fichiers Android** — navigation DCIM/Download/Pictures/…,
+   copie téléphone ↔ Ubuntu, opérations sûres ; API Companion privilégiée, ADB en
+   fallback ; import photos préservé.
+2. **Contacts** — bouton Contacts (liste, recherche, fiche), SMS/appel,
+   `READ_CONTACTS` ; module SMS non refondu.
+3. **Connexion sans câble** — Wi-Fi prioritaire (découverte, appairage, serveur
+   sans `adb forward`, reconnexion auto), Bluetooth complémentaire, ADB USB en
+   fallback.
+4. **Design / UX finale** — interface modernisée, cartes, icônes, captures
+   README, version installable ; repoussée après fiabilisation fonctionnelle.

@@ -179,6 +179,19 @@ modèle provider-first ni au chemin RCS décrit ici :
 
 `RemoteInput` / envoi RCS restent **hors scope**.
 
+## 5.4 V0.9 — temps réel (chemin RCS inchangé)
+
+V0.9 ajoute le endpoint de long polling `GET /v1/events` et un `EventBus` en
+mémoire côté Android. Conséquence pour le RCS : quand un message RCS est capté
+par `RcsNotificationListener`, un événement `sms_changed` est poussé (en plus de
+`notification_changed`), si bien que les fils RCS rattachés au provider
+apparaissent **sans clic sur Rafraîchir** côté Ubuntu. Le **modèle provider-first
+et le chemin de capture RCS restent strictement inchangés** : l'événement ne fait
+que *signaler* un changement, Ubuntu recharge ensuite `/v1/conversations` /
+`/v1/messages` / `/v1/rcs/messages` comme avant.
+
+`RemoteInput` / envoi RCS restent **hors scope**.
+
 ## 6. Limites restantes
 
 - Pas d'envoi RCS en V0.6.0.
