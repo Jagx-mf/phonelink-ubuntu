@@ -99,6 +99,40 @@ les timeouts.
 - Le modèle provider-first reste validé.
 - `RemoteInput` / envoi RCS reste hors scope.
 
+## État projet — V0.7 — serveur Android dans un Foreground Service (en cours)
+
+Branche : `feat/v0.7-android-foreground-service`.
+
+Objectif : stabiliser l'app Android Companion. Le serveur HTTP NanoHTTPD
+(`CompanionServer`) est déplacé de `MainActivity` vers un Foreground Service
+Android (`CompanionForegroundService`) afin de **survivre** à la fermeture ou la
+mise en arrière-plan de l'activité.
+
+Changements (Android uniquement) :
+
+- nouveau `CompanionForegroundService.kt` : héberge `CompanionServer`,
+  notification persistante + canal Android 8+, `startForeground` type
+  `dataSync`, `START_STICKY`, action `STOP` ;
+- `MainActivity` pilote le service (start/stop) au lieu d'héberger le serveur ;
+  l'UI affiche toujours statut/IP/port/PIN/appairage/SMS/RCS ;
+- `PairingManager.shared` : singleton de processus partagé Activity ↔ Service
+  (PIN affiché = token vérifié) ;
+- manifest : `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_DATA_SYNC`,
+  `POST_NOTIFICATIONS` + `foregroundServiceType="dataSync"` ;
+- `versionName` 0.6.0 → 0.7.0, `versionCode` 3 → 4.
+
+Inchangé : endpoints V0.6, appairage PIN/token, modèle provider-first
+SMS/MMS/RCS, `RemoteInput`/envoi RCS hors scope, aucun fichier Python touché,
+client Ubuntu non modifié.
+
+Tests : `assembleDebug` OK (APK debug ~5,6 Mo), `git diff --check` OK, aucun
+`.py` modifié.
+
+Limites restantes : PIN/token en mémoire (perdus si processus tué / régénérés
+au redémarrage `START_STICKY`), persistance à ajouter plus tard ; test de
+redémarrage complet du téléphone avec serveur survivant en arrière-plan à
+valider sur le terrain.
+
 Les sections ci-dessous restent l'analyse historique initiale du dépôt en V0.1.
 
 ## Synthèse

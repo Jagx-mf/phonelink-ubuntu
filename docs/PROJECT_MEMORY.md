@@ -229,6 +229,66 @@ Après l'ajout des notifications RCS, certaines conversations apparaissaient en 
   avec mesure de performance
 * RemoteInput / réponse RCS reste **hors** V0.6 actuelle
 
+## V0.7 — Serveur Android dans un Foreground Service (en cours)
+
+Branche : `feat/v0.7-android-foreground-service`.
+
+### Objectif
+
+Stabiliser l'application Android Companion : le serveur HTTP NanoHTTPD
+(`CompanionServer`) est déplacé de l'activité vers un **Foreground Service**
+Android (`CompanionForegroundService`). Le serveur continue donc de répondre
+même si `MainActivity` est fermée ou mise en arrière-plan.
+
+### Ce qui change (Android uniquement)
+
+* Nouveau `CompanionForegroundService.kt` :
+  * crée et gère l'unique instance `CompanionServer` ;
+  * affiche une notification persistante « PhoneLink Companion actif » ;
+  * canal de notification dédié pour Android 8+ (`IMPORTANCE_LOW`) ;
+  * `startForeground` avec type `dataSync` (requis Android 14 / API 34) ;
+  * `START_STICKY` : relance par le système si tué (PIN/token régénérés) ;
+  * action `STOP` (bouton de notification) pour arrêter proprement.
+* `MainActivity` ne possède plus le serveur : les boutons
+  « Démarrer/Arrêter » pilotent le service (`startForegroundService` /
+  `stopService`). L'UI continue d'afficher statut, IP, port 8765, PIN, état
+  appairage, permission SMS, accès notifications/RCS. Le statut démarré/arrêté
+  est lu via `CompanionForegroundService.isRunning`.
+* `PairingManager` : ajout d'un singleton de processus `PairingManager.shared`
+  partagé entre l'activité (affichage PIN) et le service (vérification token).
+  Les deux composants vivent dans le même processus → une seule instance suffit.
+* `AndroidManifest.xml` : permissions `FOREGROUND_SERVICE`,
+  `FOREGROUND_SERVICE_DATA_SYNC`, `POST_NOTIFICATIONS` ; déclaration du service
+  avec `android:foregroundServiceType="dataSync"`.
+* `POST_NOTIFICATIONS` demandée au runtime (Android 13+) au démarrage du serveur.
+* `versionCode` 3 → 4, `versionName` 0.6.0 → 0.7.0.
+
+### Ce qui ne change PAS (garanti)
+
+* Endpoints V0.6 strictement identiques : `/v1/health`, `/v1/pair`,
+  `/v1/conversations`, `/v1/messages`, `/v1/send`, `/v1/rcs/messages`,
+  `/v1/debug/notifications`, `/v1/debug/sms-provider`, `/v1/debug/mms-parts`.
+* Appairage PIN/token inchangé (même logique, instance partagée).
+* Modèle provider-first SMS/MMS/RCS **inchangé**.
+* `RemoteInput` / envoi RCS toujours **hors scope**.
+* Aucun fichier Python modifié ; client Ubuntu non touché.
+
+### Tests effectués
+
+* `assembleDebug` : **BUILD SUCCESSFUL**, APK debug généré (~5,6 Mo).
+* `git diff --check` : OK.
+* Aucun `.py` modifié.
+
+### Limites restantes V0.7
+
+* PIN/token restent **en mémoire** (`PairingManager.shared`) : perdus si le
+  processus est tué (kill système, réinstallation) ou après `START_STICKY` qui
+  régénère le PIN. Persistance à ajouter dans une version ultérieure.
+* Test de redémarrage complet du téléphone avec serveur survivant en
+  arrière-plan : **à valider sur le terrain**.
+* Comportement des limites de temps des FGS `dataSync` (Android 15+) non
+  éprouvé ; sans objet en targetSdk 34.
+
 ## Architecture actuelle
 
 Android

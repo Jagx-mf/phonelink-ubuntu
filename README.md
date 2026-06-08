@@ -71,6 +71,19 @@ python main.py
 - Le modèle provider-first reste validé.
 - `RemoteInput` et l'envoi RCS restent hors scope.
 
+## V0.7 — Serveur Android en Foreground Service (en cours)
+
+- Le serveur HTTP de l'app Android Companion tourne désormais dans un
+  **Foreground Service** (`CompanionForegroundService`).
+- Le serveur **survit** à la fermeture ou la mise en arrière-plan de l'activité.
+- Les boutons « Démarrer / Arrêter le serveur » pilotent le service ; une
+  notification persistante indique que PhoneLink Companion est actif.
+- Les endpoints V0.6 restent **inchangés**.
+- Le modèle provider-first SMS/MMS/RCS reste le modèle validé.
+- `RemoteInput` / envoi RCS reste **hors scope**.
+- Limites restantes : PIN/token en mémoire (à persister plus tard), test de
+  redémarrage complet du téléphone à valider sur le terrain.
+
 ## Structure du projet
 
 ```

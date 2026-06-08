@@ -2,12 +2,14 @@ package com.phonelink.companion
 
 import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import com.phonelink.companion.databinding.ActivityMainBinding
 import java.net.Inet4Address
 import java.net.NetworkInterface
@@ -16,8 +18,11 @@ import java.net.NetworkInterface
  * Écran unique : démarrer/arrêter le serveur, afficher IP/port/PIN, gérer les
  * permissions SMS.
  *
- * Le serveur est lié au cycle de vie de l'activité (démo) : il s'arrête quand
- * l'activité est détruite. Un service de premier plan viendra plus tard.
+ * V0.7 : le serveur n'est plus lié au cycle de vie de l'activité. Il est
+ * hébergé par [CompanionForegroundService] et **survit** donc à la fermeture ou
+ * à la mise en arrière-plan de l'activité. Les boutons « Démarrer/Arrêter »
+ * pilotent le service ; l'activité ne fait plus qu'afficher l'état (PIN partagé
+ * via [PairingManager.shared]).
  *
  * V0.5 : les permissions SMS (dangereuses) sont demandées à l'exécution. Sans
  * elles, le serveur fonctionne toujours mais sert les données de démo
@@ -26,8 +31,7 @@ import java.net.NetworkInterface
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
-    private val pairing = PairingManager()
-    private var server: CompanionServer? = null
+    private val pairing = PairingManager.shared
 
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
@@ -38,6 +42,13 @@ class MainActivity : AppCompatActivity() {
                     if (granted) R.string.sms_granted else R.string.sms_denied
                 )
             )
+        }
+
+    private val notificationPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+            // Que la permission soit accordée ou non, le serveur tourne ; seule
+            // la notification persistante peut ne pas s'afficher si refusée.
+            render()
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -59,37 +70,45 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startServer() {
-        if (server != null) return
-        val instance = CompanionServer(
-            PORT,
-            pairing,
-            deviceName(),
-            applicationContext,
-            appVersion(),
-        )
+        ensureNotificationPermission()
         try {
-            instance.start(NanoHttpdTimeout, false)
-            server = instance
+            ContextCompat.startForegroundService(this, serviceIntent())
         } catch (e: Exception) {
             toast(getString(R.string.start_error, e.message ?: ""))
         }
-        render()
+        scheduleRender()
     }
 
     private fun stopServer() {
-        server?.stop()
-        server = null
+        // Arrête le serveur ET le service ; onDestroy du service ferme NanoHTTPD.
+        stopService(serviceIntent())
+        scheduleRender()
+    }
+
+    private fun serviceIntent(): Intent =
+        Intent(this, CompanionForegroundService::class.java)
+
+    /**
+     * Le service démarre/s'arrête de façon asynchrone : on rafraîchit tout de
+     * suite puis à nouveau peu après pour refléter l'état réel du service.
+     */
+    private fun scheduleRender() {
         render()
+        binding.root.postDelayed({ render() }, 250)
+    }
+
+    private fun ensureNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
     }
 
     override fun onResume() {
         super.onResume()
-        render() // refléter une éventuelle révocation de permission depuis les réglages
-    }
-
-    override fun onDestroy() {
-        stopServer()
-        super.onDestroy()
+        render() // refléter l'état du service et une éventuelle révocation de permission
     }
 
     private fun requestSmsPermissions() {
@@ -103,7 +122,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun render() {
-        val running = server != null
+        val running = CompanionForegroundService.isRunning
         binding.txtStatus.text = getString(
             if (running) R.string.status_running else R.string.status_stopped
         )
@@ -139,19 +158,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun deviceName(): String =
-        listOf(Build.MANUFACTURER, Build.MODEL)
-            .filter { it.isNotBlank() }
-            .joinToString(" ")
-            .ifBlank { "Android" }
-
-    private fun appVersion(): String =
-        try {
-            packageManager.getPackageInfo(packageName, 0).versionName ?: ""
-        } catch (e: Exception) {
-            ""
-        }
-
     /** Première adresse IPv4 non-loopback (Wi-Fi/LAN), ou null. */
     private fun localIpAddress(): String? {
         return try {
@@ -171,8 +177,5 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val PORT = 8765
-
-        // Délai de lecture socket par défaut de NanoHTTPD (5 s).
-        private const val NanoHttpdTimeout = 5_000
     }
 }

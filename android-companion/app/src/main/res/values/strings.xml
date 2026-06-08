@@ -29,6 +29,13 @@
     <string name="rcs_access_on">Accordé — RCS capté via notifications</string>
     <string name="rcs_access_off">Non accordé — RCS indisponible</string>
 
+    <!-- V0.7 — notification persistante du Foreground Service -->
+    <string name="notif_channel_name">Serveur PhoneLink</string>
+    <string name="notif_channel_desc">Notification du serveur PhoneLink Companion en cours d\'exécution.</string>
+    <string name="notif_title">PhoneLink Companion actif</string>
+    <string name="notif_text">Serveur en cours d\'exécution sur le port %1$d</string>
+    <string name="notif_stop">Arrêter</string>
+
     <string name="pin_regenerated">Nouveau PIN généré</string>
     <string name="start_error">Erreur au démarrage : %1$s</string>
     <string name="sms_granted">Permissions SMS accordées — SMS réels actifs</string>

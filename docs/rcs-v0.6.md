@@ -155,6 +155,15 @@ curl -H "Authorization: Bearer $TOKEN" \
 - Le modèle provider-first reste validé.
 - `RemoteInput` et l'envoi RCS restent hors scope.
 
+## 5.2 V0.7 — hébergement du serveur (endpoints inchangés)
+
+À partir de V0.7, `CompanionServer` est hébergé par un Foreground Service
+Android (`CompanionForegroundService`) au lieu d'être lié à l'activité. Le
+serveur survit donc à la fermeture/mise en arrière-plan de l'app. **Les
+endpoints décrits ici, le contrat JSON et le modèle provider-first SMS/MMS/RCS
+sont strictement inchangés** : seul l'hébergement du serveur change. `RemoteInput`
+/ envoi RCS reste hors scope.
+
 ## 6. Limites restantes
 
 - Pas d'envoi RCS en V0.6.0.
