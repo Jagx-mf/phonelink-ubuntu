@@ -470,3 +470,19 @@ Faire passer PhoneLink Ubuntu d'une interface personnelle fonctionnelle à une a
 Le projet est sain pour une V0.1 : petit, local, compréhensible, et prudent sur les commandes système. Les principaux risques ne sont pas des failles évidentes, mais des hypothèses trop personnelles ou trop liées à un environnement précis : nom du téléphone, version libadwaita, sorties `bluetoothctl`/`pactl`, absence de configuration persistante et absence de tests.
 
 La V0.2 devrait donc se concentrer sur la fiabilité utilisateur : choisir explicitement le téléphone, mémoriser cette configuration, rendre les opérations longues visibles, éviter les états concurrents et couvrir les parsers critiques par des tests.
+
+## Suivi V0.9 — Temps réel + appairage accueil
+
+- Appairage Android Companion accessible depuis la fenêtre principale (boîte PIN
+  → `pair_and_save`, rechargement backend + statut + écoute temps réel).
+- Endpoint Android `GET /v1/events` (long polling, file en mémoire `EventBus.kt`)
+  pour pousser `notification_changed` / `sms_changed` / `device_status_changed`.
+- Déclencheurs Android : `NotificationListener` (notifications), `ContentObserver`
+  SMS/MMS et receiver batterie dans le Foreground Service — tous best-effort.
+- Ubuntu : `AndroidEventListener` (thread long polling, arrêt propre, anti-spam
+  token invalide) + `DesktopNotifier` (`Gio.Notification`, dédup). Mises à jour
+  GTK via `GLib.idle_add`, anti-refresh concurrents, saisie jamais vidée.
+- Protection contre refreshs concurrents (point 3 des priorités) appliquée aux
+  rafraîchissements SMS et notifications temps réel.
+- Inchangé : provider-first, endpoints existants. Hors scope : `RemoteInput`,
+  envoi RCS.

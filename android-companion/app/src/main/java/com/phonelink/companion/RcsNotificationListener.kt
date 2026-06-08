@@ -61,9 +61,33 @@ class RcsNotificationListener : NotificationListenerService() {
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
+        // V0.9 — temps réel : prévenir Ubuntu qu'une notification a changé (toutes
+        // applications, pour la fenêtre « Notifications Android »).
+        emitNotificationChanged(sbn)
         if (sbn.packageName != TARGET_PACKAGE) return
         val result = handle(sbn, log = true)
+        // Un nouveau message RCS capté impacte aussi la fenêtre Messages (fils
+        // RCS fusionnés au modèle provider-first) → signaler sms_changed.
+        if (result.added > 0) EventBus.emit(EventBus.TYPE_SMS_CHANGED)
         Log.d(TAG, "onNotificationPosted key=${sbn.key} → +${result.added} message(s)")
+    }
+
+    override fun onNotificationRemoved(sbn: StatusBarNotification) {
+        emitNotificationChanged(sbn)
+    }
+
+    /**
+     * V0.9 — pousse un événement `notification_changed` (sauf pour notre propre
+     * notification de service, pour ne pas se réveiller soi-même). Le client
+     * Ubuntu recharge alors `/v1/notifications`. Ne lève jamais.
+     */
+    private fun emitNotificationChanged(sbn: StatusBarNotification) {
+        try {
+            if (sbn.packageName == applicationContext.packageName) return
+            EventBus.emit(EventBus.TYPE_NOTIFICATION_CHANGED)
+        } catch (e: Exception) {
+            Log.w(TAG, "emitNotificationChanged échoué: ${e.message}")
+        }
     }
 
     /**

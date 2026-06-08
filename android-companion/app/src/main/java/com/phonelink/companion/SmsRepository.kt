@@ -89,6 +89,7 @@ object SmsRepository {
             var address: String,
             var lastBody: String,
             var lastTs: Long,
+            var lastOutgoing: Boolean,
             var unread: Int,
         )
 
@@ -110,12 +111,14 @@ object SmsRepository {
                     address = message.address,
                     lastBody = message.body,
                     lastTs = message.timestamp,
+                    lastOutgoing = message.outgoing,
                     unread = if (message.unreadIncoming) 1 else 0,
                 )
             } else {
                 if (message.timestamp > existing.lastTs) {
                     existing.lastBody = message.body
                     existing.lastTs = message.timestamp
+                    existing.lastOutgoing = message.outgoing
                 }
                 if (existing.address.isBlank() && message.address.isNotBlank()) {
                     existing.address = message.address
@@ -136,6 +139,7 @@ object SmsRepository {
                     .put("phone_number", s.address)
                     .put("last_message", s.lastBody)
                     .put("last_timestamp", s.lastTs)
+                    .put("last_outgoing", s.lastOutgoing)
                     .put("unread", s.unread)
             )
         }

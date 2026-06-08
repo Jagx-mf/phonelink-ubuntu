@@ -111,6 +111,54 @@ python main.py
   restent **hors scope**.
 - `versionName` 0.7.0 → 0.8.0, `versionCode` 4 → 5.
 
+## V0.9 — Temps réel + appairage depuis l'accueil (en cours)
+
+Objectif : plus besoin de cliquer sur **Rafraîchir** pour voir un nouveau
+SMS/MMS/RCS ou une nouvelle notification, et appairage accessible directement
+depuis la fenêtre principale.
+
+- **Bouton « Appairer Android Companion »** dans l'écran principal GTK : boîte de
+  dialogue PIN → `android_bridge.pair_and_save(pin)` (token persisté dans
+  `~/.config/phonelink-ubuntu/config.json`), reconstruction du pont, rechargement
+  du backend SMS, rafraîchissement de la section « Téléphone Android » et
+  redémarrage de l'écoute temps réel. Messages affichés : succès / PIN invalide /
+  serveur indisponible. Le bouton d'appairage de la fenêtre Messages est conservé.
+- **Nouvel endpoint protégé** (token requis) côté Android Companion :
+  - `GET /v1/events?since=<id>&timeout_ms=<ms>` — **long polling**. Renvoie
+    `{ "events": [ {id, type, timestamp, payload?} ], "last_event_id": N }`.
+    Si aucun événement : attend jusqu'à `timeout_ms` (borné 1–30 s, défaut
+    25 000) puis répond (liste vide possible). `since` absent/négatif ⇒
+    resynchro initiale (liste vide + `last_event_id` courant). File d'événements
+    **en mémoire**, bornée (`EventBus.kt`).
+- **Types d'événements** : `notification_changed`, `sms_changed`,
+  `device_status_changed`.
+- **Déclencheurs Android** :
+  - `notification_changed` : `RcsNotificationListener.onNotificationPosted` /
+    `onNotificationRemoved` (toutes apps, sauf notre propre notification de
+    service) ;
+  - `sms_changed` : `ContentObserver` sur `content://sms`, `content://mms`,
+    `content://mms-sms` enregistré par le Foreground Service (+ un message RCS
+    capté). L'observateur **signale** seulement un changement ; Ubuntu recharge
+    ensuite les endpoints. Échecs avalés (jamais de crash du service) ;
+  - `device_status_changed` : receiver `ACTION_POWER_CONNECTED/DISCONNECTED`
+    (branchement secteur). Le niveau % reste rafraîchi à la demande.
+- **Côté Ubuntu** :
+  - `app/core/android_bridge.py` : dataclass `BridgeEvent` + `list_events(since,
+    timeout_ms)` ;
+  - `app/core/event_listener.py` : `AndroidEventListener` (thread long polling,
+    backoff réseau, arrêt propre, token invalide géré sans spam) et
+    `DesktopNotifier` (notifications bureau natives `Gio.Notification`,
+    dédupliquées) ;
+  - mises à jour GTK toujours via `GLib.idle_add` ; pas deux refresh SMS ni deux
+    refresh notifications concurrents ; la **saisie en cours** n'est jamais vidée.
+- **Notifications bureau Ubuntu** sobres : « Nouveau SMS — Contact » et
+  « App — Titre » pour une notification Android. Messages **sortants** ignorés
+  (le résumé `/v1/conversations` porte désormais `last_outgoing`), pas de popup
+  si la fenêtre concernée est active, dédup par id/timestamp.
+- Les **boutons Rafraîchir** manuels restent en place (fallback). Les endpoints
+  existants et le modèle provider-first sont **inchangés**. `RemoteInput` et
+  envoi RCS restent **hors scope**.
+
 ## Structure du projet
 
 ```

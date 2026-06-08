@@ -430,6 +430,43 @@ GTK Messages
 * ADB Wi-Fi
 * Appairage complet
 
+## V0.9 — Temps réel + appairage depuis l'accueil
+
+Objectif : afficher automatiquement les nouveaux SMS/MMS/RCS et notifications
+sans bouton Rafraîchir, et appairer depuis la fenêtre principale.
+
+Endpoint ajouté (token requis) :
+* `GET /v1/events?since=<id>&timeout_ms=<ms>` — long polling.
+  Réponse : `{ "events": [ {id, type, timestamp, payload?} ], "last_event_id": N }`.
+  Aucun événement ⇒ attente jusqu'à `timeout_ms` (borné 1–30 s, défaut 25 000)
+  puis réponse (liste vide possible). `since` négatif/absent ⇒ resynchro initiale.
+  File en mémoire bornée (`EventBus.kt`). N'altère aucun endpoint existant.
+
+Types d'événements : `notification_changed`, `sms_changed`, `device_status_changed`.
+
+Déclencheurs Android :
+* `notification_changed` ← `RcsNotificationListener` (posted/removed, toutes apps
+  sauf la notification de service).
+* `sms_changed` ← `ContentObserver` sur `content://sms`, `content://mms`,
+  `content://mms-sms` (Foreground Service) + message RCS capté. L'observateur
+  signale seulement « changement » ; Ubuntu recharge ensuite les endpoints.
+* `device_status_changed` ← receiver `ACTION_POWER_CONNECTED/DISCONNECTED`.
+
+Côté Ubuntu :
+* `BridgeEvent` + `list_events()` dans `app/core/android_bridge.py` ;
+* `app/core/event_listener.py` : `AndroidEventListener` (thread long polling,
+  backoff, arrêt propre, token invalide sans spam) + `DesktopNotifier`
+  (`Gio.Notification`, dédup) ;
+* `main_window.py` orchestre : bouton « Appairer Android Companion », routage des
+  événements vers les fenêtres Messages/Notifications, notifications bureau ;
+* `/v1/conversations` porte désormais `last_outgoing` (direction du dernier
+  message) → preview correcte + suppression des notifications de SMS sortants.
+
+Inchangé : provider-first, endpoints existants, Foreground Service V0.7.
+Hors scope : `RemoteInput`, envoi RCS.
+
+`versionName` 0.8.0 → 0.9.0, `versionCode` 5 → 6.
+
 ## Commandes utiles
 
 adb devices
@@ -437,6 +474,9 @@ adb devices
 adb forward tcp:8765 tcp:8765
 
 curl http://127.0.0.1:8765/v1/health
+
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://127.0.0.1:8765/v1/events?since=0&timeout_ms=5000"
 
 curl -X POST http://127.0.0.1:8765/v1/pair 
 -H "Content-Type: application/json" 

@@ -418,15 +418,16 @@ class AndroidCompanionBackend(SmsBackend):
         for bc in bridge_convos:
             # The /conversations summary carries only the last message preview,
             # not the full thread — synthesize a single Message so the list view
-            # can render its preview. The outgoing flag is unknown here (the API
-            # summary doesn't carry it), so default to received.
+            # can render its preview. Since V0.9 the summary also carries the
+            # direction (``last_outgoing``), so the preview ("Vous : …") and the
+            # desktop-notification "skip outgoing" logic are accurate.
             messages: list[Message] = []
             if bc.last_message:
                 messages = [
                     Message(
                         body=bc.last_message,
                         timestamp=bc.last_timestamp or datetime.now(),
-                        outgoing=False,
+                        outgoing=bc.last_outgoing,
                     )
                 ]
             convos.append(

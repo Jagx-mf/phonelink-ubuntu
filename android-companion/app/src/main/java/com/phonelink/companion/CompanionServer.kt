@@ -20,6 +20,7 @@ import org.json.JSONObject
  *  - `GET  /rcs/messages`  token requis (RCS captés via notifications)
  *  - `GET  /device/status` token requis (batterie + statut téléphone, V0.8)
  *  - `GET  /notifications`  token requis (snapshot notifications actives, V0.8)
+ *  - `GET  /events`        token requis (long polling temps réel, V0.9)
  *  - `GET  /debug/notifications` token requis (diagnostic notifications)
  *  - `GET  /debug/sms-provider` token requis (diagnostic providers SMS/MMS)
  *  - `GET  /debug/mms-parts` token requis (diagnostic parts MMS)
@@ -70,6 +71,8 @@ class CompanionServer(
                 guarded(session) { deviceStatus() }
             method == Method.GET && uri == "/v1/notifications" ->
                 guarded(session) { notifications() }
+            method == Method.GET && uri == "/v1/events" ->
+                guarded(session) { events(session) }
             method == Method.GET && uri == "/v1/debug/notifications" ->
                 guarded(session) { debugNotifications() }
             method == Method.GET && uri == "/v1/debug/sms-provider" ->
@@ -233,6 +236,24 @@ class CompanionServer(
             Response.Status.OK,
             JSONObject().put("notifications", listener.activeNotificationsSnapshot()),
         )
+    }
+
+    /**
+     * V0.9 — long polling temps réel. `GET /v1/events?since=<id>&timeout_ms=<ms>`.
+     *
+     * Renvoie les événements d'id > `since` ; si aucun, **attend** jusqu'à
+     * `timeout_ms` (borné 1–30 s, défaut 25 s) qu'un nouvel événement arrive,
+     * puis répond (liste possiblement vide). Permet à Ubuntu d'afficher les
+     * nouveaux SMS/notifications sans bouton « Rafraîchir ».
+     *
+     * `since` absent/invalide ⇒ resynchro initiale (liste vide + `last_event_id`
+     * courant). Voir [EventBus]. N'impacte aucun endpoint existant.
+     */
+    private fun events(session: IHTTPSession): Response {
+        val since = session.parameters["since"]?.firstOrNull()?.toLongOrNull() ?: -1L
+        val timeoutMs = session.parameters["timeout_ms"]?.firstOrNull()?.toLongOrNull()
+            ?: EventBus.DEFAULT_TIMEOUT_MS
+        return json(Response.Status.OK, EventBus.poll(since, timeoutMs))
     }
 
     private fun debugNotifications(): Response {

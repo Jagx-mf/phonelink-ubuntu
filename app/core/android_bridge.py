@@ -155,6 +155,27 @@ class AndroidNotification:
     is_clearable: bool
 
 
+#: Types d'événements temps réel (contrat partagé avec EventBus.kt côté Android).
+EVENT_NOTIFICATION_CHANGED = "notification_changed"
+EVENT_SMS_CHANGED = "sms_changed"
+EVENT_DEVICE_STATUS_CHANGED = "device_status_changed"
+
+
+@dataclass(frozen=True)
+class BridgeEvent:
+    """Un événement temps réel renvoyé par ``GET /events`` (long polling, V0.9).
+
+    ``id`` est incrémental (monotone côté serveur tant que le service tourne).
+    ``type`` vaut l'un des ``EVENT_*`` ci-dessus (d'autres types futurs sont
+    tolérés et simplement ignorés par l'UI). ``payload`` est un dict minimal
+    optionnel — l'UI recharge ensuite les endpoints concernés.
+    """
+    id: int
+    type: str
+    timestamp: Optional[datetime]
+    payload: dict = field(default_factory=dict)
+
+
 @dataclass(frozen=True)
 class BridgeConversation:
     """Résumé de conversation renvoyé par ``GET /conversations``."""
@@ -163,6 +184,7 @@ class BridgeConversation:
     phone_number: str
     last_message: str = ""
     last_timestamp: Optional[datetime] = None
+    last_outgoing: bool = False  # direction du dernier message (V0.9)
     unread: int = 0
 
 
@@ -305,6 +327,44 @@ class AndroidBridge:
         data = self._request("GET", "/notifications")
         return [_parse_notification(n) for n in data.get("notifications", [])]
 
+    #: Marge ajoutée au timeout réseau au-delà du ``timeout_ms`` serveur, pour
+    #: que urllib ne coupe jamais une attente long polling encore en cours.
+    EVENTS_NETWORK_MARGIN_S = 10.0
+
+    def list_events(
+        self, since: int = -1, timeout_ms: int = 25_000
+    ) -> tuple[list[BridgeEvent], int]:
+        """Long polling temps réel (``GET /events``, V0.9).
+
+        Renvoie ``(events, last_event_id)`` : les événements d'id > ``since``,
+        et le dernier id connu du serveur (à repasser en ``since`` au tour
+        suivant). ``since < 0`` demande une **resynchro initiale** (le serveur
+        renvoie une liste vide + son ``last_event_id`` courant).
+
+        En mode ``MOCK``, renvoie ``([], max(since, 0))`` sans réseau. En HTTP,
+        peut lever :class:`BridgeError` (réseau/HTTP/token) — l'appelant (thread
+        d'écoute GTK) gère le retry/backoff et ne crashe jamais l'UI.
+        """
+        if self.mode is BridgeMode.MOCK:
+            return [], max(since, 0)
+
+        # Le serveur garde la connexion ouverte jusqu'à ``timeout_ms`` : le
+        # timeout réseau doit lui laisser de la marge, sinon urllib couperait
+        # l'attente et on enchaînerait des reconnexions inutiles.
+        net_timeout = timeout_ms / 1000.0 + self.EVENTS_NETWORK_MARGIN_S
+        data = self._request(
+            "GET",
+            "/events",
+            params={"since": since, "timeout_ms": timeout_ms},
+            timeout=net_timeout,
+        )
+        events = [_parse_event(e) for e in data.get("events", [])]
+        try:
+            last_event_id = int(data.get("last_event_id", since))
+        except (ValueError, TypeError):
+            last_event_id = max(since, 0)
+        return events, last_event_id
+
     def send_message(
         self,
         body: str,
@@ -415,15 +475,19 @@ class AndroidBridge:
         path: str,
         params: Optional[dict] = None,
         json_body: Optional[dict] = None,
+        timeout: Optional[float] = None,
     ) -> dict:
         """Effectuer une requête HTTP JSON vers l'app compagnon (stdlib only).
 
         - ``method`` : ``"GET"`` ou ``"POST"``.
         - ``params`` : query-string (GET) ; les valeurs ``None`` sont ignorées.
         - ``json_body`` : corps JSON (POST).
+        - ``timeout`` : délai réseau spécifique (défaut ``self.timeout``). Le long
+          polling ``/events`` passe ici une valeur > ``timeout_ms`` pour ne pas
+          couper l'attente côté serveur.
 
         Ajoute ``Authorization: Bearer <token>`` si un token est présent, applique
-        ``self.timeout``, et renvoie le JSON décodé (toujours un ``dict`` :
+        le timeout, et renvoie le JSON décodé (toujours un ``dict`` :
         une réponse vide donne ``{}``).
 
         Lève :class:`BridgeError` pour toute erreur réseau, HTTP (4xx/5xx) ou
@@ -448,7 +512,9 @@ class AndroidBridge:
         logger.debug("android_bridge: %s %s", method.upper(), url)
 
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            with urllib.request.urlopen(
+                req, timeout=timeout if timeout is not None else self.timeout
+            ) as resp:
                 raw = resp.read()
         except urllib.error.HTTPError as exc:
             # Réponse reçue mais statut d'erreur (4xx/5xx). Le corps peut porter
@@ -561,6 +627,20 @@ def _parse_notification(raw: dict) -> AndroidNotification:
     )
 
 
+def _parse_event(raw: dict) -> BridgeEvent:
+    try:
+        event_id = int(raw.get("id", 0))
+    except (ValueError, TypeError):
+        event_id = 0
+    payload = raw.get("payload")
+    return BridgeEvent(
+        id=event_id,
+        type=str(raw.get("type", "")),
+        timestamp=_epoch_ms_to_dt(raw.get("timestamp")),
+        payload=payload if isinstance(payload, dict) else {},
+    )
+
+
 def _parse_conversation(raw: dict) -> BridgeConversation:
     return BridgeConversation(
         id=str(raw.get("id", "")),
@@ -568,6 +648,7 @@ def _parse_conversation(raw: dict) -> BridgeConversation:
         phone_number=str(raw.get("phone_number", "")),
         last_message=str(raw.get("last_message", "")),
         last_timestamp=_epoch_ms_to_dt(raw.get("last_timestamp")),
+        last_outgoing=bool(raw.get("last_outgoing", False)),
         unread=int(raw.get("unread", 0) or 0),
     )
 
@@ -818,6 +899,22 @@ def get_device_status() -> DeviceStatus:
 
 def list_notifications() -> list[AndroidNotification]:
     return get_bridge().list_notifications()
+
+
+def list_events(
+    since: int = -1, timeout_ms: int = 25_000
+) -> tuple[list[BridgeEvent], int]:
+    return get_bridge().list_events(since=since, timeout_ms=timeout_ms)
+
+
+def is_realtime_available() -> bool:
+    """True si le pont actif peut faire du long polling réel (HTTP + token).
+
+    Le thread d'écoute d'événements ne démarre que dans ce cas : en mode mock ou
+    non appairé, ``/events`` n'a pas de sens (rien à pousser).
+    """
+    bridge = get_bridge()
+    return bridge.mode is BridgeMode.HTTP and bool(bridge.token)
 
 
 def send_message(

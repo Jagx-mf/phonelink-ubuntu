@@ -67,6 +67,10 @@ class SmsWindow(Gtk.Window):
         # Compteur de génération : un chargement async obsolète est ignoré si
         # l'utilisateur a changé de conversation entre-temps.
         self._load_seq = 0
+        # Temps réel (V0.9) : évite deux rafraîchissements SMS concurrents ; un
+        # événement reçu pendant un refresh en cours est rejoué une fois à la fin.
+        self._realtime_busy = False
+        self._realtime_again = False
         # Scroll auto en bas : armé à chaque ouverture, consommé une fois le
         # contenu réellement mis en page (cf. _on_thread_adj_changed).
         self._scroll_pending = False
@@ -577,6 +581,11 @@ class SmsWindow(Gtk.Window):
         entry.connect("activate", do_pair)
         win.present()
 
+    def reload_backend(self) -> None:
+        """API publique : recharge le backend après un appairage déclenché
+        ailleurs (p. ex. depuis la fenêtre principale)."""
+        self._reload_backend()
+
     def _reload_backend(self) -> None:
         """Recharge le backend (après appairage) et reconstruit la liste."""
         sms_core.set_backend(None)  # forcera une re-sélection (config http+token)
@@ -589,21 +598,84 @@ class SmsWindow(Gtk.Window):
         self._reload_conversation_list()
 
     def _reload_conversation_list(self) -> None:
-        child = self._list.get_first_child()
-        while child is not None:
-            nxt = child.get_next_sibling()
-            self._list.remove(child)
-            child = nxt
         try:
             convos = self._backend.list_conversations()
         except Exception as exc:
             logger.warning("SMS: liste conversations indisponible: %s", exc)
             convos = []
+        self._populate_conversations(convos, select_first=True)
+
+    def _populate_conversations(
+        self,
+        convos: list[sms_core.Conversation],
+        select_id: str | None = None,
+        select_first: bool = False,
+    ) -> None:
+        """Reconstruit la liste des conversations.
+
+        ``select_id`` re-sélectionne le fil de cet id s'il existe encore (temps
+        réel : on préserve la sélection courante). Sinon, ``select_first`` choisit
+        le premier fil (rechargement après appairage). Sans l'un ni l'autre,
+        aucune sélection forcée."""
+        child = self._list.get_first_child()
+        while child is not None:
+            nxt = child.get_next_sibling()
+            self._list.remove(child)
+            child = nxt
         for convo in convos:
             self._list.append(self._conversation_row(convo))
-        first = self._list.get_row_at_index(0)
-        if first is not None:
-            self._list.select_row(first)
+        target = self._row_for_id(select_id) if select_id is not None else None
+        if target is not None:
+            self._list.select_row(target)
+        elif select_first:
+            first = self._list.get_row_at_index(0)
+            if first is not None:
+                self._list.select_row(first)
+
+    # ── rafraîchissement temps réel (événement sms_changed) ──
+
+    def refresh_realtime(self) -> None:
+        """Rafraîchit la liste + le fil ouvert suite à un événement sms_changed.
+
+        Préserve **la sélection** ET **la saisie en cours** : seul le contenu est
+        rechargé (depuis un thread, sans bloquer GTK). Coalesce les appels
+        rapprochés via :attr:`_realtime_busy`."""
+        if self._realtime_busy:
+            self._realtime_again = True
+            return
+        self._realtime_busy = True
+        current = self._current_id
+        # Invalide le cache du fil courant pour forcer un rechargement frais.
+        if current is not None:
+            self._cache.pop(current, None)
+
+        def worker() -> None:
+            try:
+                convos = self._backend.list_conversations()
+                err: Exception | None = None
+            except Exception as exc:  # ne jamais crasher l'UI
+                convos, err = [], exc
+            GLib.idle_add(self._on_realtime_loaded, convos, current, err)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_realtime_loaded(
+        self,
+        convos: list[sms_core.Conversation],
+        select_id: str | None,
+        err: Exception | None,
+    ) -> bool:
+        self._realtime_busy = False
+        if err is not None:
+            logger.warning("SMS: rafraîchissement temps réel échoué: %s", err)
+        else:
+            # Re-sélectionner le fil courant déclenche son rechargement (cache
+            # invalidé) → les nouveaux messages apparaissent sans toucher la saisie.
+            self._populate_conversations(convos, select_id=select_id)
+        if self._realtime_again:
+            self._realtime_again = False
+            self.refresh_realtime()
+        return False  # one-shot
 
     def _row_for_id(self, conversation_id: str) -> Gtk.ListBoxRow | None:
         index = 0

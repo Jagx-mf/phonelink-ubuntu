@@ -4,10 +4,16 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
+import android.database.ContentObserver
+import android.net.Uri
 import android.os.Build
+import android.os.Handler
+import android.os.HandlerThread
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
@@ -33,6 +39,13 @@ class CompanionForegroundService : Service() {
 
     private var server: CompanionServer? = null
 
+    // V0.9 — temps réel : observateur des providers SMS/MMS + receiver batterie,
+    // qui poussent des événements dans [EventBus] (cf. /v1/events). Tout est
+    // best-effort : un échec d'enregistrement ne casse jamais le service.
+    private var observerThread: HandlerThread? = null
+    private var smsObserver: ContentObserver? = null
+    private var powerReceiver: BroadcastReceiver? = null
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -47,6 +60,7 @@ class CompanionForegroundService : Service() {
         }
         startInForeground()
         startServer()
+        startRealtimeWatchers()
         // START_STICKY : si le système tue le service, il le relance (intent
         // null) et le serveur redémarre. PIN/token sont alors régénérés
         // (état en mémoire — limite V0.7).
@@ -87,6 +101,7 @@ class CompanionForegroundService : Service() {
     }
 
     private fun stopServerAndSelf() {
+        stopRealtimeWatchers()
         stopServerInstance()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
@@ -100,8 +115,104 @@ class CompanionForegroundService : Service() {
     }
 
     override fun onDestroy() {
+        stopRealtimeWatchers()
         stopServerInstance()
         super.onDestroy()
+    }
+
+    // ---- temps réel (V0.9) : observer SMS/MMS + batterie -----------------
+
+    /**
+     * Enregistre l'observateur des providers SMS/MMS et le receiver batterie.
+     * Best-effort et idempotent : toute exception est avalée (un provider
+     * indisponible ou une permission manquante ne doit jamais faire crasher le
+     * Foreground Service). L'observateur **signale seulement** un changement —
+     * il ne reconstruit pas l'historique ; Ubuntu recharge ensuite les endpoints.
+     */
+    private fun startRealtimeWatchers() {
+        startSmsObserver()
+        startPowerReceiver()
+    }
+
+    private fun startSmsObserver() {
+        if (smsObserver != null) return
+        // Sans READ_SMS, l'observation des providers échoue : on s'abstient (le
+        // mode démo n'a de toute façon pas de provider à surveiller).
+        if (!SmsRepository.hasReadSms(applicationContext)) {
+            Log.i(TAG, "SMS observer non démarré (READ_SMS absent)")
+            return
+        }
+        val thread = HandlerThread("sms-observer").also { it.start() }
+        observerThread = thread
+        val handler = Handler(thread.looper)
+        val observer = object : ContentObserver(handler) {
+            private var lastEmit = 0L
+            override fun onChange(selfChange: Boolean, uri: Uri?) {
+                // Débounce léger : un seul SMS provoque plusieurs notifications
+                // (sms puis mms-sms). On coalesce pour ne pas spammer EventBus.
+                val now = System.currentTimeMillis()
+                if (now - lastEmit < DEBOUNCE_MS) return
+                lastEmit = now
+                EventBus.emit(EventBus.TYPE_SMS_CHANGED)
+            }
+        }
+        smsObserver = observer
+        val resolver = applicationContext.contentResolver
+        for (uri in SMS_OBSERVED_URIS) {
+            try {
+                resolver.registerContentObserver(Uri.parse(uri), true, observer)
+            } catch (e: Exception) {
+                // Certains providers/ROMs refusent l'observation : on documente
+                // la limite et on continue (les autres URIs restent surveillées).
+                Log.w(TAG, "registerContentObserver($uri) échoué: ${e.message}")
+            }
+        }
+        Log.i(TAG, "SMS/MMS observer enregistré")
+    }
+
+    private fun startPowerReceiver() {
+        if (powerReceiver != null) return
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                // Branchement/débranchement secteur : la batterie change d'état
+                // de charge → rafraîchir la section « Téléphone Android » côté
+                // Ubuntu. Le niveau % reste rafraîchi périodiquement/à la demande.
+                EventBus.emit(EventBus.TYPE_DEVICE_STATUS_CHANGED)
+            }
+        }
+        powerReceiver = receiver
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_POWER_CONNECTED)
+            addAction(Intent.ACTION_POWER_DISCONNECTED)
+        }
+        try {
+            registerReceiver(receiver, filter)
+            Log.i(TAG, "Receiver batterie enregistré")
+        } catch (e: Exception) {
+            Log.w(TAG, "registerReceiver(power) échoué: ${e.message}")
+            powerReceiver = null
+        }
+    }
+
+    private fun stopRealtimeWatchers() {
+        smsObserver?.let {
+            try {
+                applicationContext.contentResolver.unregisterContentObserver(it)
+            } catch (e: Exception) {
+                Log.w(TAG, "unregisterContentObserver échoué: ${e.message}")
+            }
+        }
+        smsObserver = null
+        observerThread?.quitSafely()
+        observerThread = null
+        powerReceiver?.let {
+            try {
+                unregisterReceiver(it)
+            } catch (e: Exception) {
+                Log.w(TAG, "unregisterReceiver(power) échoué: ${e.message}")
+            }
+        }
+        powerReceiver = null
     }
 
     // ---- notification ----------------------------------------------------
@@ -179,6 +290,16 @@ class CompanionForegroundService : Service() {
 
         private const val NOTIF_ID = 1
         private const val CHANNEL_ID = "phonelink_companion_server"
+
+        /** Débounce de l'observateur SMS/MMS (un message ⇒ plusieurs onChange). */
+        private const val DEBOUNCE_MS = 800L
+
+        /** Providers SMS/MMS surveillés (cf. Telephony). `mms-sms` = vue jointe. */
+        private val SMS_OBSERVED_URIS = listOf(
+            "content://sms",
+            "content://mms",
+            "content://mms-sms",
+        )
 
         /** Action d'arrêt (bouton de la notification ou demande explicite). */
         const val ACTION_STOP = "com.phonelink.companion.action.STOP"

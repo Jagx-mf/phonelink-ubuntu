@@ -66,6 +66,14 @@ class NotificationsWindow(Gtk.Window):
 
         self._reload()
 
+    # ── API publique (temps réel V0.9) ───────────────
+
+    def reload_async(self) -> None:
+        """Recharge la liste des notifications (déclenché par un événement
+        ``notification_changed``). Sûr à appeler à répétition : le compteur de
+        génération interne ignore les chargements obsolètes."""
+        self._reload()
+
     # ── chargement (thread + GLib.idle_add) ──────────
 
     def _reload(self) -> None:

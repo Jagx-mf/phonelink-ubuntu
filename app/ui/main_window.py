@@ -21,6 +21,8 @@ from app.core import scrcpy as scrcpy_core
 from app.core import photos as photos_core
 from app.core import system_checks
 from app.core import android_bridge
+from app.core import sms as sms_core
+from app.core import event_listener
 from app.core.config import PhoneLinkConfig, load_config, save_config
 from app.ui.gallery_window import GalleryWindow
 from app.ui.sms_window import SmsWindow
@@ -70,9 +72,25 @@ class MainWindow(_Base):
         # ADB Wi-Fi host entry (set during _build_ui)
         self._wifi_host_entry: Optional[Gtk.Entry] = None
 
+        # Temps réel Android (V0.9) : fenêtres enfants suivies (pour les
+        # rafraîchir), écouteur d'événements long polling et notifications bureau.
+        self._sms_window: Optional[SmsWindow] = None
+        self._notif_window: Optional[NotificationsWindow] = None
+        self._notifier: Optional[event_listener.DesktopNotifier] = None
+        #: conversation_id → timestamp (epoch s) du dernier message vu (anti-doublon).
+        self._sms_seen: dict[str, float] = {}
+        self._event_listener = event_listener.AndroidEventListener(
+            on_event=self._on_android_event,
+            on_auth_error=self._on_realtime_auth_required,
+        )
+
         self._build_ui()
+        self.connect("close-request", self._on_close)
         # First refresh slightly deferred so the window renders first
         GLib.timeout_add(200, self._refresh_status)
+        # Démarre l'écoute temps réel une fois la fenêtre rattachée à l'app
+        # (nécessaire pour les notifications bureau via Gtk.Application).
+        GLib.timeout_add(600, self._start_realtime)
 
     # ──────────────────────────────────────────────
     # UI construction
@@ -130,6 +148,7 @@ class MainWindow(_Base):
         page.add(actions_group)
 
         actions = [
+            ("Appairer Android Companion",  "channel-secure-symbolic",             self._on_pair_android),
             ("Scanner Bluetooth",           "network-wireless-acquiring-symbolic", self._on_scan_bt),
             ("Reconnecter le téléphone",    "bluetooth-symbolic",                  self._on_reconnect),
             ("Paramètres Bluetooth",        "preferences-system-symbolic",         self._on_bt_settings),
@@ -279,6 +298,7 @@ class MainWindow(_Base):
         content.append(t2)
 
         for label, callback in [
+            ("Appairer Android Companion",  self._on_pair_android),
             ("Scanner Bluetooth",           self._on_scan_bt),
             ("Reconnecter le téléphone",    self._on_reconnect),
             ("Paramètres Bluetooth",        self._on_bt_settings),
@@ -519,12 +539,30 @@ class MainWindow(_Base):
         gallery.present()
 
     def _on_open_sms(self, _):
+        if self._sms_window is not None:
+            self._sms_window.present()
+            return
         sms = SmsWindow(parent=self)
+        self._sms_window = sms
+        sms.connect("close-request", self._on_sms_closed)
         sms.present()
 
+    def _on_sms_closed(self, *_):
+        self._sms_window = None
+        return False
+
     def _on_open_notifications(self, _):
+        if self._notif_window is not None:
+            self._notif_window.present()
+            return
         notifications = NotificationsWindow(parent=self)
+        self._notif_window = notifications
+        notifications.connect("close-request", self._on_notif_closed)
         notifications.present()
+
+    def _on_notif_closed(self, *_):
+        self._notif_window = None
+        return False
 
     def _on_open_photos(self, _):
         ok, msg = photos_core.open_local_folder()
@@ -635,10 +673,270 @@ class MainWindow(_Base):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    # ──────────────────────────────────────────────
+    # Appairage Android Companion (Part 1)
+    # ──────────────────────────────────────────────
+
+    def _on_pair_android(self, _):
+        """Ouvre une boîte de dialogue PIN, appaire et reconfigure le pont.
+
+        Au succès : token persisté en config (via ``pair_and_save``), backend SMS
+        rechargé, statut « Téléphone Android » rafraîchi et écoute temps réel
+        redémarrée. N'altère pas l'appairage déjà présent dans la fenêtre
+        Messages (qui se met aussi à jour si elle est ouverte)."""
+        win = Gtk.Window(
+            title="Appairer Android Companion", transient_for=self, modal=True
+        )
+        win.set_default_size(380, -1)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        box.set_margin_top(20)
+        box.set_margin_bottom(20)
+        box.set_margin_start(20)
+        box.set_margin_end(20)
+
+        info = Gtk.Label(
+            label="Saisissez le PIN affiché par l'app PhoneLink Companion sur le "
+                  "téléphone.\nLa connexion locale (port-forward ADB ou réseau) "
+                  "doit être active."
+        )
+        info.set_wrap(True)
+        info.set_xalign(0)
+        box.append(info)
+
+        entry = Gtk.Entry()
+        entry.set_placeholder_text("PIN à 6 chiffres")
+        entry.set_max_length(6)
+        entry.set_input_purpose(Gtk.InputPurpose.DIGITS)
+        box.append(entry)
+
+        status = Gtk.Label(label="")
+        status.set_wrap(True)
+        status.set_xalign(0)
+        box.append(status)
+
+        btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        btns.set_halign(Gtk.Align.END)
+        cancel = Gtk.Button(label="Annuler")
+        cancel.connect("clicked", lambda _b: win.destroy())
+        pair = Gtk.Button(label="Appairer")
+        pair.add_css_class("suggested-action")
+        btns.append(cancel)
+        btns.append(pair)
+        box.append(btns)
+        win.set_child(box)
+
+        def do_pair(_w=None) -> None:
+            pin = entry.get_text().strip()
+            if not pin:
+                status.set_text("Veuillez saisir le PIN.")
+                return
+            pair.set_sensitive(False)
+            status.set_text("Appairage en cours…")
+
+            def worker() -> None:
+                try:
+                    android_bridge.pair_and_save(pin)
+                    err: Exception | None = None
+                except Exception as exc:  # BridgeError et autres
+                    err = exc
+                GLib.idle_add(on_done, err)
+
+            def on_done(err: Exception | None) -> bool:
+                if err is not None:
+                    logger.warning("Appairage (accueil) échoué: %s", err)
+                    status.set_text(_pair_error_message(err))
+                    pair.set_sensitive(True)
+                    return False
+                logger.info("Appairage (accueil) réussi")
+                win.destroy()
+                self._after_pairing()
+                return False
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        pair.connect("clicked", do_pair)
+        entry.connect("activate", do_pair)
+        win.present()
+
+    def _after_pairing(self) -> None:
+        """Reconfigure tout l'écosystème après un appairage réussi."""
+        # Le backend SMS sera reconstruit (http + nouveau token) au prochain accès.
+        sms_core.set_backend(None)
+        # Si la fenêtre Messages est ouverte, elle bascule sur le nouveau backend.
+        if self._sms_window is not None:
+            try:
+                self._sms_window.reload_backend()
+            except Exception as exc:  # ne jamais casser l'accueil
+                logger.warning("Rechargement backend Messages échoué: %s", exc)
+        if self._notif_window is not None:
+            self._notif_window.reload_async()
+        self._refresh_status()
+        self._restart_realtime()
+        show_dialog(
+            self,
+            "Appairage Android",
+            "Appairage réussi — téléphone Android connecté.\n"
+            "Batterie, serveur, SMS et notifications vont se mettre à jour.",
+        )
+
+    # ──────────────────────────────────────────────
+    # Temps réel : écoute des événements Android (Part 4 & 6)
+    # ──────────────────────────────────────────────
+
+    def _start_realtime(self) -> bool:
+        """Crée le notifieur bureau et démarre l'écoute si appairé. One-shot."""
+        app = self.get_application()
+        if app is not None and self._notifier is None:
+            self._notifier = event_listener.DesktopNotifier(app)
+        if android_bridge.is_realtime_available():
+            if self._event_listener.start():
+                self._prime_baselines()
+        return False  # GLib timeout one-shot
+
+    def _restart_realtime(self) -> None:
+        """Redémarre l'écoute (après (ré)appairage) en réamorçant les bases."""
+        self._sms_seen.clear()
+        if self._event_listener.start():
+            self._prime_baselines()
+
+    def _prime_baselines(self) -> None:
+        """Mémorise l'état courant (SMS + notifications) **sans** notifier, pour
+        ne pas déclencher de notifications bureau pour du contenu déjà présent."""
+        def sms_worker() -> None:
+            try:
+                convos = sms_core.get_backend().list_conversations()
+            except Exception:
+                convos = []
+            GLib.idle_add(self._apply_sms, convos, True)
+
+        def notif_worker() -> None:
+            try:
+                notifs = android_bridge.list_notifications()
+            except Exception:
+                notifs = []
+            GLib.idle_add(self._apply_notifications, notifs, True)
+
+        threading.Thread(target=sms_worker, daemon=True).start()
+        threading.Thread(target=notif_worker, daemon=True).start()
+
+    def _on_android_event(self, event: "android_bridge.BridgeEvent") -> None:
+        """Routeur d'événements (appelé sur le thread GTK via GLib.idle_add)."""
+        if event.type == android_bridge.EVENT_DEVICE_STATUS_CHANGED:
+            self._refresh_status()
+        elif event.type == android_bridge.EVENT_NOTIFICATION_CHANGED:
+            self._handle_notification_event()
+        elif event.type == android_bridge.EVENT_SMS_CHANGED:
+            self._handle_sms_event()
+
+    def _on_realtime_auth_required(self) -> None:
+        """Token invalide détecté par l'écouteur : on n'en fait pas un drame
+        (pas de spam) — un ré-appairage depuis l'accueil suffit."""
+        logger.warning("Temps réel: token invalide — ré-appairage requis")
+
+    def _on_close(self, *_):
+        """Arrête proprement l'écoute à la fermeture de la fenêtre principale."""
+        self._event_listener.stop()
+        return False  # laisse la fermeture suivre son cours
+
+    # ── SMS (événement sms_changed) ──
+
+    def _handle_sms_event(self) -> None:
+        if self._sms_window is not None:
+            self._sms_window.refresh_realtime()
+        if self._notifier is None:
+            return
+
+        def worker() -> None:
+            try:
+                convos = sms_core.get_backend().list_conversations()
+            except Exception:
+                convos = []
+            GLib.idle_add(self._apply_sms, convos, False)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_sms(self, convos: list, prime: bool) -> bool:
+        """Diffe les conversations et notifie les **nouveaux entrants** (pas en
+        mode prime, pas pour les sortants, pas si la fenêtre Messages est active)."""
+        active = self._sms_window is not None and self._sms_window.is_active()
+        for convo in convos:
+            last = convo.last_message
+            if last is None:
+                continue
+            ts = last.timestamp.timestamp() if last.timestamp else 0.0
+            prev = self._sms_seen.get(convo.id)
+            self._sms_seen[convo.id] = max(prev or 0.0, ts)
+            if prime or self._notifier is None or last.outgoing:
+                continue
+            is_new = prev is None or ts > prev
+            if is_new and not active:
+                self._notifier.notify(
+                    f"sms:{convo.id}:{int(ts)}",
+                    "PhoneLink Ubuntu — Nouveau SMS",
+                    f"{convo.contact_name} : {last.body}",
+                )
+        return False  # one-shot
+
+    # ── Notifications Android (événement notification_changed) ──
+
+    def _handle_notification_event(self) -> None:
+        if self._notif_window is not None:
+            self._notif_window.reload_async()
+        if self._notifier is None:
+            return
+
+        def worker() -> None:
+            try:
+                notifs = android_bridge.list_notifications()
+            except Exception:
+                notifs = []
+            GLib.idle_add(self._apply_notifications, notifs, False)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_notifications(self, notifs: list, prime: bool) -> bool:
+        """Notifie les **nouvelles** notifications Android (dédupliquées par id).
+
+        En mode prime, ou si la fenêtre Notifications est active, on marque
+        seulement comme vues (aucun popup)."""
+        if self._notifier is None:
+            return False
+        active = self._notif_window is not None and self._notif_window.is_active()
+        for notif in notifs:
+            key = f"notif:{notif.id}"
+            if prime or active:
+                self._notifier.mark_seen(key)
+                continue
+            app_label = notif.app_name or notif.package or "Notification"
+            title = f"PhoneLink Ubuntu — {app_label}"
+            text = notif.big_text or notif.text
+            # Corps lisible : « Expéditeur : message » quand les deux existent.
+            if notif.title and text:
+                body = f"{notif.title} : {text}"
+            else:
+                body = text or notif.title
+            self._notifier.notify(key, title, body)
+        return False  # one-shot
+
 
 # ──────────────────────────────────────────────
 # Module-level helpers
 # ──────────────────────────────────────────────
+
+
+def _pair_error_message(exc: Exception) -> str:
+    """Message clair selon le type d'échec d'appairage."""
+    status = getattr(exc, "status", None)
+    if status in (401, 403):
+        return "PIN invalide ou expiré. Vérifiez le PIN affiché sur le téléphone."
+    if status is None:
+        return (
+            "Serveur Android indisponible.\n"
+            "Vérifiez que l'app compagnon tourne et que la connexion locale "
+            "(port-forward ADB ou réseau) est active."
+        )
+    return f"Échec de l'appairage : {exc}"
 
 _PHONE_KEYWORDS = (
     "s21", "mickael", "samsung", "galaxy", "pixel", "oneplus", "xiaomi",
