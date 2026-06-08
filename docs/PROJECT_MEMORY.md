@@ -178,6 +178,18 @@ Après l'ajout des notifications RCS, certaines conversations apparaissaient en 
 * historique Cathy récent reste visible
 * lazy loading conservé
 * cache GTK conservé
+
+### Validation terrain datée — 2026-06-08
+
+* Validation après redémarrage du téléphone et de l'application Android Companion
+* L'application GTK redémarre correctement
+* Les conversations SMS/MMS/RCS restent visibles après redémarrage
+* La conversation Cathy récente reste lisible
+* Les doublons principaux ne réapparaissent pas visuellement
+* L'envoi SMS classique fonctionne encore après les changements provider-first SMS/MMS/RCS
+* Le modèle provider-first reste validé
+* `RemoteInput` / envoi RCS reste hors scope
+
 * appairage Android conservé
 * pas de retour à V0.5
 * pas de suppression de `rcs_store.json`
@@ -305,4 +317,3 @@ Statut :
 V0.6 validée.
 Doublons SMS/MMS/RCS corrigés, comportement rapproché de KDE Connect.
 Reste : noms MMS-only vides (hors scope), RemoteInput / réponse RCS (V0.6.1+).
-

@@ -87,6 +87,18 @@ les timeouts.
 - Cause résolue : lecture provider trop limitée.
 - Correctif validé : lecture `mms-sms` + parts MMS + lazy loading.
 
+### Validation terrain complémentaire — 2026-06-08
+
+- Validation après redémarrage du téléphone et de l'application Android Companion.
+- L'application GTK redémarre correctement.
+- Les conversations SMS/MMS/RCS restent visibles après redémarrage.
+- La conversation Cathy récente reste lisible.
+- Les doublons principaux ne réapparaissent pas visuellement.
+- L'envoi SMS classique fonctionne encore après les changements provider-first
+  SMS/MMS/RCS.
+- Le modèle provider-first reste validé.
+- `RemoteInput` / envoi RCS reste hors scope.
+
 Les sections ci-dessous restent l'analyse historique initiale du dépôt en V0.1.
 
 ## Synthèse

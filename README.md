@@ -59,6 +59,18 @@ python main.py
 ~/.local/share/phonelink-ubuntu/phonelink.log
 ```
 
+## Validation terrain V0.6
+
+- Date : 08/06/2026.
+- Validation après redémarrage du téléphone et de l'application Android Companion.
+- L'application GTK redémarre correctement.
+- Les conversations SMS/MMS/RCS restent visibles après redémarrage.
+- La conversation Cathy récente reste lisible.
+- Les doublons principaux ne réapparaissent pas visuellement.
+- L'envoi SMS classique fonctionne encore après les changements provider-first SMS/MMS/RCS.
+- Le modèle provider-first reste validé.
+- `RemoteInput` et l'envoi RCS restent hors scope.
+
 ## Structure du projet
 
 ```
