@@ -29,6 +29,44 @@ cd phonelink-ubuntu
 python main.py
 ```
 
+## Installation du lanceur Linux
+
+Pour lancer PhoneLink Ubuntu comme une application normale (menu
+Applications GNOME, icône, recherche), sans taper `python3 main.py` :
+
+```bash
+chmod +x scripts/install-desktop-launcher.sh
+./scripts/install-desktop-launcher.sh
+```
+
+Le script installe, **sans sudo**, dans votre dossier utilisateur :
+
+- `~/.local/bin/phonelink-ubuntu` — lanceur (lien symbolique vers
+  `scripts/phonelink-ubuntu`, qui retrouve la racine du projet et lance
+  l'application avec le bon répertoire de travail) ;
+- `~/.local/share/applications/phonelink-ubuntu.desktop` — entrée de menu
+  (le champ `Exec=` est réécrit avec le chemin absolu du lanceur) ;
+- `~/.local/share/icons/hicolor/scalable/apps/phonelink-ubuntu.svg` — icône.
+
+Lancement ensuite :
+
+- depuis le **menu Applications** (« PhoneLink Ubuntu ») ;
+- ou en ligne de commande : `phonelink-ubuntu`.
+
+Désinstallation :
+
+```bash
+./scripts/uninstall-desktop-launcher.sh
+```
+
+Notes :
+
+- le lanceur étant un lien symbolique vers le dépôt, **ne déplacez pas le
+  dossier du projet** après installation (relancez simplement le script
+  d'installation si vous le déplacez) ;
+- la configuration (`~/.config/phonelink-ubuntu`) et les téléchargements ne
+  sont pas touchés par la désinstallation.
+
 ## Prérequis détaillés
 
 → [docs/installation.md](docs/installation.md)

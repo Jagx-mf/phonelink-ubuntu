@@ -60,7 +60,12 @@
       Fichiers et photos / Connexion / Audio et affichage (Adwaita + GTK pur).
 - [x] Icônes symboliques, états OK ✓ / indisponible / « — » plus clairs,
       ligne « Connexion » (USB / Wi-Fi / indisponible).
-- [ ] Captures d'écran dans le README ; version installable (plus tard).
+- [x] Lanceur Linux Desktop : exécutable `phonelink-ubuntu`, fichier
+      `.desktop`, icône SVG, scripts d'installation/désinstallation locaux
+      (`scripts/install-desktop-launcher.sh`) — voir README « Installation du
+      lanceur Linux ».
+- [ ] Captures d'écran dans le README ; paquet installable (deb/Flatpak, plus
+      tard).
 
 ---
 

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=PhoneLink Ubuntu
+Comment=Connecter un téléphone Android à Ubuntu
+Comment[en]=Connect an Android phone to Ubuntu
+Exec=phonelink-ubuntu
+Icon=phonelink-ubuntu
+Terminal=false
+Type=Application
+Categories=Utility;Network;GTK;
+Keywords=android;phone;sms;notifications;fichiers;contacts;
+StartupNotify=true
+StartupWMClass=com.phonelink.ubuntu

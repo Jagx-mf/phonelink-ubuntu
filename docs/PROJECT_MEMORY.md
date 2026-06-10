@@ -728,3 +728,33 @@ mode appel, diagnostic), ADB Wi-Fi (avancé).
   token/PIN en mémoire côté Android ; suppression récursive des dossiers
   (confirmation UI, racines protégées) ; reconnexion Wi-Fi automatique en cas
   de changement d'IP non implémentée (re-scan manuel).
+
+---
+
+## Lanceur Linux Desktop (2026-06-10, branche feat/linux-desktop-launcher)
+
+Intégration bureau locale, sans toucher à l'application ni à Android :
+
+- `scripts/phonelink-ubuntu` — lanceur bash : résout son chemin réel
+  (`readlink -f`, liens symboliques suivis), se place à la racine du projet,
+  vérifie python3/main.py (erreur visible via zenity → notify-send → stderr),
+  puis `exec python3 main.py`. Le `.desktop` n'appelle jamais python
+  directement.
+- `packaging/linux/phonelink-ubuntu.desktop` — Name/Comment/Exec=
+  phonelink-ubuntu/Icon/Terminal=false/Categories=Utility;Network;GTK;/
+  StartupNotify=true + `StartupWMClass=com.phonelink.ubuntu`.
+- `assets/icons/phonelink-ubuntu.svg` — icône simple (écran + téléphone
+  reliés, palette GNOME) ; pas un design final.
+- `scripts/install-desktop-launcher.sh` — installe sans sudo : symlink
+  `~/.local/bin/phonelink-ubuntu`, `.desktop` dans
+  `~/.local/share/applications/` (Exec= réécrit en chemin absolu : le menu
+  GNOME n'a pas forcément `~/.local/bin` dans son PATH), icône dans
+  `~/.local/share/icons/hicolor/scalable/apps/`, puis
+  `update-desktop-database`/`gtk-update-icon-cache` best-effort.
+- `scripts/uninstall-desktop-launcher.sh` — supprime les trois fichiers
+  installés (config et téléchargements préservés).
+
+Limites : le symlink casse si le dépôt est déplacé (relancer l'installation) ;
+sous Wayland, l'association parfaite icône↔fenêtre dans le dock peut exiger un
+`.desktop` nommé `com.phonelink.ubuntu.desktop` (app-id GTK) — non bloquant,
+`StartupWMClass` couvre X11.

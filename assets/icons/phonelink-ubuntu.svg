@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Icône PhoneLink Ubuntu — écran + téléphone reliés.
+  Volontairement simple (pas de design final) : formes plates, palette GNOME.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#62a0ea"/>
+      <stop offset="1" stop-color="#1c71d8"/>
+    </linearGradient>
+    <linearGradient id="screen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1a5fb4"/>
+      <stop offset="1" stop-color="#153d72"/>
+    </linearGradient>
+  </defs>
+
+  <!-- fond arrondi -->
+  <rect x="6" y="6" width="116" height="116" rx="26" fill="url(#bg)"/>
+
+  <!-- écran d'ordinateur -->
+  <g>
+    <rect x="20" y="32" width="64" height="44" rx="6" fill="#ffffff"/>
+    <rect x="25" y="37" width="54" height="34" rx="3" fill="url(#screen)"/>
+    <!-- pied -->
+    <rect x="46" y="76" width="12" height="8" fill="#ffffff"/>
+    <rect x="36" y="84" width="32" height="6" rx="3" fill="#ffffff"/>
+  </g>
+
+  <!-- lien (arc + points) entre l'écran et le téléphone -->
+  <path d="M 56 98 Q 71 110 86 98" fill="none" stroke="#ffffff"
+        stroke-width="5" stroke-linecap="round" stroke-dasharray="0.1 9"/>
+
+  <!-- téléphone (devant, à droite) -->
+  <g>
+    <rect x="78" y="44" width="32" height="58" rx="8" fill="#ffffff"/>
+    <rect x="82" y="52" width="24" height="40" rx="2" fill="url(#screen)"/>
+    <circle cx="94" cy="97" r="3" fill="#1c71d8"/>
+    <rect x="89" y="46.5" width="10" height="3" rx="1.5" fill="#1c71d8"/>
+  </g>
+
+  <!-- onde de synchronisation au-dessus du téléphone -->
+  <g fill="none" stroke="#ffffff" stroke-width="4" stroke-linecap="round">
+    <path d="M 100 36 a 12 12 0 0 1 12 12" opacity="0.55"/>
+    <path d="M 100 26 a 22 22 0 0 1 22 22" opacity="0.35"/>
+  </g>
+</svg>

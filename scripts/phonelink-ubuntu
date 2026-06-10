@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Lanceur PhoneLink Ubuntu.
+#
+# Conçu pour être appelé depuis le menu Applications (fichier .desktop) ou en
+# ligne de commande, y compris via un lien symbolique dans ~/.local/bin :
+#  - résout son propre chemin réel (liens symboliques suivis) pour retrouver
+#    la racine du projet, quel que soit l'endroit d'où il est invoqué ;
+#  - se place à la racine du projet (l'application charge config, modules et
+#    ressources relativement à ce répertoire) ;
+#  - vérifie la présence de python3 et de main.py avec une erreur claire,
+#    visible aussi hors terminal (zenity, sinon notify-send, sinon stderr).
+set -euo pipefail
+
+err() {
+    # Erreur visible même lancé sans terminal depuis le menu GNOME.
+    local message="$1"
+    if command -v zenity >/dev/null 2>&1; then
+        zenity --error --title="PhoneLink Ubuntu" --text="${message}" 2>/dev/null || true
+    elif command -v notify-send >/dev/null 2>&1; then
+        notify-send -a "PhoneLink Ubuntu" "PhoneLink Ubuntu — erreur" "${message}" || true
+    fi
+    printf 'PhoneLink Ubuntu : %s\n' "${message}" >&2
+    exit 1
+}
+
+# Chemin réel du script (suit les liens symboliques, ex. ~/.local/bin).
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+PROJECT_ROOT="$(dirname "$(dirname "${SCRIPT_PATH}")")"
+
+command -v python3 >/dev/null 2>&1 \
+    || err "python3 est introuvable. Installez-le avec : sudo apt install python3"
+
+[ -f "${PROJECT_ROOT}/main.py" ] \
+    || err "main.py introuvable dans ${PROJECT_ROOT} — le projet a-t-il été déplacé ?"
+
+cd "${PROJECT_ROOT}"
+exec python3 main.py "$@"
