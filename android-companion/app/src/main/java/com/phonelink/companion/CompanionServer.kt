@@ -21,6 +21,16 @@ import org.json.JSONObject
  *  - `GET  /device/status` token requis (batterie + statut téléphone, V0.8)
  *  - `GET  /notifications`  token requis (snapshot notifications actives, V0.8)
  *  - `GET  /events`        token requis (long polling temps réel, V0.9)
+ *  - `GET  /files/roots`   token requis (racines autorisées, V1.0)
+ *  - `GET  /files/list`    token requis (contenu d'un dossier, V1.0)
+ *  - `GET  /files/download` token requis (téléchargement binaire, V1.0)
+ *  - `POST /files/upload`  token requis (upload binaire brut, V1.0)
+ *  - `POST /files/mkdir`   token requis (V1.0)
+ *  - `POST /files/delete`  token requis (V1.0)
+ *  - `POST /files/rename`  token requis (V1.0)
+ *  - `GET  /contacts`      token requis (carnet d'adresses, V1.0)
+ *  - `GET  /contacts/search` token requis (filtre q=, V1.0)
+ *  - `POST /call/start`    token requis (ouvre le dialer ACTION_DIAL, V1.0)
  *  - `GET  /debug/notifications` token requis (diagnostic notifications)
  *  - `GET  /debug/sms-provider` token requis (diagnostic providers SMS/MMS)
  *  - `GET  /debug/mms-parts` token requis (diagnostic parts MMS)
@@ -73,6 +83,26 @@ class CompanionServer(
                 guarded(session) { notifications() }
             method == Method.GET && uri == "/v1/events" ->
                 guarded(session) { events(session) }
+            method == Method.GET && uri == "/v1/files/roots" ->
+                guarded(session) { filesRoots() }
+            method == Method.GET && uri == "/v1/files/list" ->
+                guarded(session) { filesList(session) }
+            method == Method.GET && uri == "/v1/files/download" ->
+                guarded(session) { filesDownload(session) }
+            method == Method.POST && uri == "/v1/files/upload" ->
+                guarded(session) { filesUpload(session) }
+            method == Method.POST && uri == "/v1/files/mkdir" ->
+                guarded(session) { filesMkdir(session) }
+            method == Method.POST && uri == "/v1/files/delete" ->
+                guarded(session) { filesDelete(session) }
+            method == Method.POST && uri == "/v1/files/rename" ->
+                guarded(session) { filesRename(session) }
+            method == Method.GET && uri == "/v1/contacts" ->
+                guarded(session) { contacts(session, search = false) }
+            method == Method.GET && uri == "/v1/contacts/search" ->
+                guarded(session) { contacts(session, search = true) }
+            method == Method.POST && uri == "/v1/call/start" ->
+                guarded(session) { callStart(session) }
             method == Method.GET && uri == "/v1/debug/notifications" ->
                 guarded(session) { debugNotifications() }
             method == Method.GET && uri == "/v1/debug/sms-provider" ->
@@ -97,6 +127,10 @@ class CompanionServer(
             .put("default_sms_app", SmsRepository.isDefaultSmsApp(context))
             .put("notification_access", RcsNotificationListener.hasAccess(context))
             .put("device", deviceName)
+            // V1.0 — capacités fichiers/contacts (champs additifs, le client
+            // V0.x les ignore simplement).
+            .put("files_permission", FileRepository.hasFullAccess(context))
+            .put("contacts_permission", ContactsRepository.hasReadContacts(context))
             // Champs historiques conservés pour rétro-compatibilité de l'app.
             .put("paired", pairing.isPaired)
             .put("api_version", "v1")
@@ -254,6 +288,161 @@ class CompanionServer(
         val timeoutMs = session.parameters["timeout_ms"]?.firstOrNull()?.toLongOrNull()
             ?: EventBus.DEFAULT_TIMEOUT_MS
         return json(Response.Status.OK, EventBus.poll(since, timeoutMs))
+    }
+
+    // ---- fichiers (V1.0 — Phase 1) ----------------------------------------
+
+    /** Garde commune : permission stockage requise pour tous les endpoints /v1/files. */
+    private fun requireFilesAccess(): Response? {
+        if (FileRepository.hasFullAccess(context)) return null
+        return json(
+            Response.Status.FORBIDDEN,
+            JSONObject().put("error", "files_permission_missing"),
+        )
+    }
+
+    private fun filesRoots(): Response {
+        requireFilesAccess()?.let { return it }
+        return json(Response.Status.OK, FileRepository.roots())
+    }
+
+    private fun filesList(session: IHTTPSession): Response {
+        requireFilesAccess()?.let { return it }
+        val raw = session.parameters["path"]?.firstOrNull()
+        val dir = FileRepository.resolve(raw)
+            ?: return jsonError(Response.Status.BAD_REQUEST, "forbidden_path")
+        if (!dir.isDirectory) {
+            return jsonError(Response.Status.BAD_REQUEST, "not_a_directory")
+        }
+        return json(Response.Status.OK, FileRepository.list(dir))
+    }
+
+    /**
+     * Téléchargement binaire en streaming (pas de chargement en mémoire). Le
+     * nom de fichier est fourni en en-tête `Content-Disposition` pour le client.
+     */
+    private fun filesDownload(session: IHTTPSession): Response {
+        requireFilesAccess()?.let { return it }
+        val raw = session.parameters["path"]?.firstOrNull()
+        val file = FileRepository.resolve(raw)
+            ?: return jsonError(Response.Status.BAD_REQUEST, "forbidden_path")
+        if (!file.isFile) {
+            return jsonError(Response.Status.NOT_FOUND, "not_found")
+        }
+        return try {
+            val response = newFixedLengthResponse(
+                Response.Status.OK,
+                FileRepository.mimeOf(file.name),
+                file.inputStream(),
+                file.length(),
+            )
+            val safeName = file.name.replace("\"", "_")
+            response.addHeader(
+                "Content-Disposition",
+                "attachment; filename=\"$safeName\"",
+            )
+            response
+        } catch (e: Exception) {
+            jsonError(Response.Status.INTERNAL_ERROR, "read_failed")
+        }
+    }
+
+    /**
+     * Upload binaire **brut** : `POST /v1/files/upload?path=<dossier>&name=<nom>`
+     * avec le contenu du fichier en corps de requête (octet-stream). On lit
+     * directement le flux de la session (pas de `parseBody` : il bufferiserait
+     * et corromprait le binaire).
+     */
+    private fun filesUpload(session: IHTTPSession): Response {
+        requireFilesAccess()?.let { return it }
+        val rawDir = session.parameters["path"]?.firstOrNull()
+        val name = session.parameters["name"]?.firstOrNull()
+        val dir = FileRepository.resolve(rawDir)
+            ?: return jsonError(Response.Status.BAD_REQUEST, "forbidden_path")
+        val contentLength = session.headers["content-length"]?.toLongOrNull() ?: -1L
+        if (contentLength < 0) {
+            return jsonError(Response.Status.BAD_REQUEST, "missing_content_length")
+        }
+        val result = FileRepository.upload(
+            context, dir, name, session.inputStream, contentLength
+        )
+        val status = if (result.optBoolean("ok")) {
+            Response.Status.OK
+        } else {
+            Response.Status.BAD_REQUEST
+        }
+        return json(status, result)
+    }
+
+    private fun filesMkdir(session: IHTTPSession): Response {
+        requireFilesAccess()?.let { return it }
+        val payload = readJsonBody(session)
+        val dir = FileRepository.resolve(payload?.optString("path"))
+            ?: return jsonError(Response.Status.BAD_REQUEST, "forbidden_path")
+        val result = FileRepository.mkdir(dir, payload?.optString("name"))
+        val status = if (result.optBoolean("ok")) {
+            Response.Status.OK
+        } else {
+            Response.Status.BAD_REQUEST
+        }
+        return json(status, result)
+    }
+
+    private fun filesDelete(session: IHTTPSession): Response {
+        requireFilesAccess()?.let { return it }
+        val payload = readJsonBody(session)
+        val target = FileRepository.resolve(payload?.optString("path"))
+            ?: return jsonError(Response.Status.BAD_REQUEST, "forbidden_path")
+        if (!target.exists()) {
+            return jsonError(Response.Status.NOT_FOUND, "not_found")
+        }
+        val result = FileRepository.delete(context, target)
+        val status = if (result.optBoolean("ok")) {
+            Response.Status.OK
+        } else {
+            Response.Status.BAD_REQUEST
+        }
+        return json(status, result)
+    }
+
+    private fun filesRename(session: IHTTPSession): Response {
+        requireFilesAccess()?.let { return it }
+        val payload = readJsonBody(session)
+        val source = FileRepository.resolve(payload?.optString("path"))
+            ?: return jsonError(Response.Status.BAD_REQUEST, "forbidden_path")
+        val result = FileRepository.rename(context, source, payload?.optString("new_name"))
+        val status = if (result.optBoolean("ok")) {
+            Response.Status.OK
+        } else {
+            Response.Status.BAD_REQUEST
+        }
+        return json(status, result)
+    }
+
+    // ---- contacts & appel (V1.0 — Phase 2) --------------------------------
+
+    private fun contacts(session: IHTTPSession, search: Boolean): Response {
+        if (!ContactsRepository.hasReadContacts(context)) {
+            return json(
+                Response.Status.FORBIDDEN,
+                JSONObject().put("error", "contacts_permission_missing"),
+            )
+        }
+        val query = if (search) session.parameters["q"]?.firstOrNull() else null
+        return json(Response.Status.OK, ContactsRepository.contacts(context, query))
+    }
+
+    private fun callStart(session: IHTTPSession): Response {
+        val payload = readJsonBody(session)
+        val result = ContactsRepository.startDial(
+            context, payload?.optString("phone_number")
+        )
+        val status = if (result.optBoolean("ok")) {
+            Response.Status.OK
+        } else {
+            Response.Status.BAD_REQUEST
+        }
+        return json(status, result)
     }
 
     private fun debugNotifications(): Response {

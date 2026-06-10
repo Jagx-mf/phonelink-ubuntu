@@ -523,3 +523,29 @@ Limites : `RemoteInput`/envoi RCS hors scope ; événements en mémoire côté A
    fallback.
 4. **Design / UX finale** — interface modernisée, cartes, icônes, captures
    README, version installable ; repoussée après fiabilisation fonctionnelle.
+
+### V1.0 — Phases 1–4 implémentées (2026-06-10, validation terrain à faire)
+
+Branche `feat/full-phone-link-completion-test`. Détail complet :
+`docs/PROJECT_MEMORY.md` (section V1.0) et README.
+
+- **Fichiers** : `FileRepository.kt` + `GET /v1/files/roots|list|download`,
+  `POST /v1/files/upload|mkdir|delete|rename` (token requis, dossiers publics
+  seulement, anti path-traversal, MANAGE_EXTERNAL_STORAGE sur Android 11+) ;
+  fenêtre GTK « Fichiers Android » (`files_window.py`), téléchargements vers
+  `~/Téléchargements/PhoneLinkUbuntu` (`app/core/files.py`).
+- **Contacts** : `ContactsRepository.kt` + `GET /v1/contacts[/search]`,
+  `POST /v1/call/start` (ACTION_DIAL, confirmation sur le téléphone) ; fenêtre
+  GTK « Contacts » (`contacts_window.py`), `SmsWindow.compose_to()` (fil
+  existant ou nouveau message par numéro).
+- **Wi-Fi sans câble** : fenêtre « Connexion Android »
+  (`connection_window.py`) — USB/ADB forward ou Wi-Fi IP:port, test
+  `/v1/health`, persistance config, scan /24 local (`app/core/discovery.py`) ;
+  ADB USB en fallback, Bluetooth réservé à l'audio.
+- **UX** : accueil en sections (Téléphone, Communication, Fichiers et photos,
+  Connexion, Audio et affichage), ligne « Connexion » (USB/Wi-Fi/indisponible).
+- **Fix** : sauvegarde config qui écrasait token/URL d'appairage
+  (`dataclasses.replace` dans `main_window.py`).
+- Inchangé : provider-first, tous les endpoints V0.x, EventBus temps réel,
+  Foreground Service, envoi SMS classique. Hors scope : RemoteInput, envoi RCS.
+- Build Android à faire via Android Studio (gradle absent côté dev Ubuntu).

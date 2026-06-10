@@ -61,6 +61,10 @@ class SmsWindow(Gtk.Window):
         self._backend = sms_core.get_backend()
         self._current_id: str | None = None
         self._current_source: str = "sms"  # source du fil ouvert (compose RCS off)
+        # Nouveau message hors conversation (V1.0 — ouvert depuis Contacts) :
+        # numéro/nom du destinataire quand aucun fil existant ne correspond.
+        self._compose_number: str | None = None
+        self._compose_name: str = ""
         # Cache des messages déjà chargés, par conversation_id → liste de Message.
         # Évite de recharger depuis Android à chaque clic (P3).
         self._cache: dict[str, list[sms_core.Message]] = {}
@@ -180,7 +184,14 @@ class SmsWindow(Gtk.Window):
         self._list.add_css_class("navigation-sidebar")
         self._list.connect("row-selected", self._on_conversation_selected)
 
-        for convo in self._backend.list_conversations():
+        # Téléphone injoignable (backend HTTP sans connexion) : la fenêtre doit
+        # quand même s'ouvrir, avec une liste vide — jamais de crash.
+        try:
+            convos = self._backend.list_conversations()
+        except Exception as exc:
+            logger.warning("SMS: liste conversations indisponible: %s", exc)
+            convos = []
+        for convo in convos:
             self._list.append(self._conversation_row(convo))
 
         scroll.set_child(self._list)
@@ -191,6 +202,7 @@ class SmsWindow(Gtk.Window):
         row._conversation_id = convo.id  # read back on selection
         row._contact_name = convo.contact_name  # used by the send confirmation
         row._source = convo.source  # "sms" | "rcs" — gère compose + badge
+        row._phone_number = convo.phone_number  # matching depuis Contacts (V1.0)
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         box.set_margin_top(8)
@@ -296,9 +308,15 @@ class SmsWindow(Gtk.Window):
         if row is None:
             self._current_id = None
             self._current_source = "sms"
-            self._render_messages([])
+            # Préserve un éventuel mode « nouveau message » (compose_to) : la
+            # désélection fait partie de son ouverture.
+            if self._compose_number is None:
+                self._render_messages([])
             self._update_compose_state()
             return
+        # Sélectionner un fil réel sort du mode « nouveau message ».
+        self._compose_number = None
+        self._compose_name = ""
         self._current_id = getattr(row, "_conversation_id", None)
         self._current_source = getattr(row, "_source", "sms")
         self._update_compose_state()
@@ -321,12 +339,10 @@ class SmsWindow(Gtk.Window):
 
     def _on_entry_changed(self, entry: Gtk.Entry) -> None:
         has_text = bool(entry.get_text().strip())
-        can_send = (
-            has_text
-            and self._current_id is not None
-            and self._current_source != "rcs"
-        )
-        self._send_btn.set_sensitive(can_send)
+        has_target = (
+            self._current_id is not None and self._current_source != "rcs"
+        ) or self._compose_number is not None
+        self._send_btn.set_sensitive(has_text and has_target)
 
     def _on_refresh_clicked(self, _btn: Gtk.Button) -> None:
         if self._current_id is None:
@@ -337,7 +353,18 @@ class SmsWindow(Gtk.Window):
 
     def _on_send(self, _widget) -> None:
         body = self._entry.get_text().strip()
-        if not body or self._current_id is None:
+        if not body:
+            return
+        # Mode « nouveau message » (depuis Contacts) : envoi par numéro.
+        if self._current_id is None and self._compose_number is not None:
+            if self._is_android_backend():
+                self._confirm_real_send_number(
+                    self._compose_number, self._compose_name, body
+                )
+            else:
+                self._do_send_number(self._compose_number, body, real=False)
+            return
+        if self._current_id is None:
             return
         # Envoi réel (backend Android) → confirmation explicite obligatoire.
         if self._is_android_backend():
@@ -504,6 +531,135 @@ class SmsWindow(Gtk.Window):
         if not sent and detail:
             from app.ui.widgets import show_dialog
             show_dialog(self, "Envoi SMS", detail, error=real)
+
+    # ── nouveau message depuis Contacts (V1.0) ────
+
+    def compose_to(self, phone_number: str, contact_name: str = "") -> None:
+        """API publique : prépare un message vers ``phone_number``.
+
+        Si une conversation existante correspond au numéro (comparaison
+        normalisée), elle est ouverte. Sinon, la fenêtre passe en mode
+        « nouveau message » : la zone de saisie vise directement le numéro
+        (``POST /send`` avec ``phone_number``)."""
+        self.present()
+        number = (phone_number or "").strip()
+        if not number:
+            return
+        target = self._row_for_number(number)
+        if target is not None:
+            self._list.select_row(target)
+            self._entry.grab_focus()
+            return
+        # Aucun fil existant : mode nouveau message.
+        self._list.unselect_all()
+        self._compose_number = number
+        self._compose_name = contact_name or number
+        self._current_id = None
+        self._current_source = "sms"
+        self._render_compose_placeholder()
+        self._entry.set_sensitive(True)
+        self._entry.set_placeholder_text(f"Votre message à {self._compose_name}…")
+        self._on_entry_changed(self._entry)
+        self._entry.grab_focus()
+
+    def _row_for_number(self, phone_number: str) -> Gtk.ListBoxRow | None:
+        """Retrouve la conversation dont le numéro normalisé correspond."""
+        wanted = sms_core._normalise_phone(phone_number)
+        if not wanted:
+            return None
+        index = 0
+        while True:
+            row = self._list.get_row_at_index(index)
+            if row is None:
+                return None
+            row_number = getattr(row, "_phone_number", "")
+            if row_number and sms_core._normalise_phone(row_number) == wanted:
+                return row
+            index += 1
+
+    def _render_compose_placeholder(self) -> None:
+        """Zone messages en mode « nouveau message » : destinataire affiché."""
+        self._clear_thread()
+        title = Gtk.Label(label=f"Nouveau message à {self._compose_name}")
+        title.add_css_class("heading")
+        title.set_margin_top(24)
+        self._thread_box.append(title)
+        if self._compose_name != self._compose_number:
+            number = Gtk.Label(label=self._compose_number or "")
+            number.add_css_class("sms-preview")
+            self._thread_box.append(number)
+        hint = Gtk.Label(
+            label="La conversation apparaîtra dans la liste après le premier envoi."
+        )
+        hint.add_css_class("sms-preview")
+        hint.set_margin_top(8)
+        self._thread_box.append(hint)
+
+    def _confirm_real_send_number(
+        self, phone_number: str, contact_name: str, body: str
+    ) -> None:
+        """Confirmation explicite avant un VRAI SMS vers un nouveau numéro."""
+        target = contact_name or phone_number
+        dialog = Gtk.AlertDialog()
+        dialog.set_modal(True)
+        dialog.set_message("Envoyer un vrai SMS ?")
+        dialog.set_detail(
+            f"Le message sera réellement envoyé à « {target} » ({phone_number}) "
+            "via votre téléphone Android. Cette action peut être facturée par "
+            "votre opérateur."
+        )
+        dialog.set_buttons(["Annuler", "Envoyer"])
+        dialog.set_cancel_button(0)
+        dialog.set_default_button(1)
+
+        def on_response(dlg: Gtk.AlertDialog, res) -> None:
+            try:
+                choice = dlg.choose_finish(res)
+            except GLib.Error:
+                return  # fermé/annulé
+            if choice != 1:
+                logger.info("SMS: envoi réel (nouveau numéro) annulé")
+                return
+            android_bridge.set_allow_real_send(True)
+            self._do_send_number(phone_number, body, real=True)
+
+        dialog.choose(self, None, on_response)
+
+    def _do_send_number(self, phone_number: str, body: str, real: bool) -> None:
+        """Envoie ``body`` vers ``phone_number`` (nouveau fil) en arrière-plan."""
+        self._send_btn.set_sensitive(False)
+
+        def worker() -> None:
+            try:
+                result = android_bridge.send_message(body, phone_number=phone_number)
+                sent, detail, err = result.sent, result.detail, None
+            except Exception as exc:  # réseau/HTTP : jamais dans GTK
+                sent, detail, err = False, "", exc
+            GLib.idle_add(on_done, sent, detail, err)
+
+        def on_done(sent: bool, detail: str, err: Exception | None) -> bool:
+            self._on_entry_changed(self._entry)
+            from app.ui.widgets import show_dialog
+            if err is not None:
+                logger.warning("SMS: envoi (numéro %s) échoué: %s", phone_number, err)
+                show_dialog(self, "Envoi SMS", f"Échec de l'envoi : {err}", error=True)
+                return False
+            logger.info(
+                "SMS: envoi par numéro (réel=%s) → %s : transmis=%s detail=%r",
+                real, phone_number, sent, detail,
+            )
+            if sent:
+                self._entry.set_text("")
+                # Le fil existe maintenant côté Android : recharge la liste et
+                # ouvre la conversation correspondante.
+                self._compose_number = None
+                self._compose_name = ""
+                self.refresh_realtime()
+            elif detail:
+                show_dialog(self, "Envoi SMS", detail, error=real)
+            return False  # one-shot
+
+        threading.Thread(target=worker, daemon=True).start()
 
     # ── appairage PIN ─────────────────────────────
 

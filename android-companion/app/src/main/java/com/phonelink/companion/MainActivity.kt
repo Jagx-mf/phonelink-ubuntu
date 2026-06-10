@@ -3,6 +3,7 @@ package com.phonelink.companion
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
@@ -65,6 +66,7 @@ class MainActivity : AppCompatActivity() {
         }
         binding.btnRequestSms.setOnClickListener { requestSmsPermissions() }
         binding.btnNotifAccess.setOnClickListener { openNotificationAccessSettings() }
+        binding.btnFilesAccess.setOnClickListener { requestFilesAccess() }
 
         render()
     }
@@ -145,8 +147,45 @@ class MainActivity : AppCompatActivity() {
         )
         binding.btnNotifAccess.isEnabled = !rcsOk
 
+        val filesOk = FileRepository.hasFullAccess(this)
+        binding.txtFiles.text = getString(
+            if (filesOk) R.string.files_access_on else R.string.files_access_off
+        )
+        binding.btnFilesAccess.isEnabled = !filesOk
+
         binding.btnStart.isEnabled = !running
         binding.btnStop.isEnabled = running
+    }
+
+    /**
+     * V1.0 — explorateur de fichiers. Android 11+ : ouvre le réglage « Accès à
+     * tous les fichiers » de l'app (MANAGE_EXTERNAL_STORAGE, pas de dialogue
+     * runtime possible). Android ≤ 10 : demande READ/WRITE_EXTERNAL_STORAGE.
+     */
+    private fun requestFilesAccess() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                startActivity(
+                    Intent(
+                        Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                        Uri.parse("package:$packageName"),
+                    )
+                )
+            } catch (e: Exception) {
+                try {
+                    startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+                } catch (e2: Exception) {
+                    toast(getString(R.string.start_error, e2.message ?: ""))
+                }
+            }
+        } else {
+            permissionLauncher.launch(
+                arrayOf(
+                    Manifest.permission.READ_EXTERNAL_STORAGE,
+                    Manifest.permission.WRITE_EXTERNAL_STORAGE,
+                )
+            )
+        }
     }
 
     private fun openNotificationAccessSettings() {

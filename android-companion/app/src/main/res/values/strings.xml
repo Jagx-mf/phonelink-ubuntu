@@ -29,6 +29,12 @@
     <string name="rcs_access_on">Accordé — RCS capté via notifications</string>
     <string name="rcs_access_off">Non accordé — RCS indisponible</string>
 
+    <!-- V1.0 — Explorateur de fichiers + contacts -->
+    <string name="label_files_access">Accès fichiers (explorateur)</string>
+    <string name="files_access_on">Accordé — explorateur de fichiers actif</string>
+    <string name="files_access_off">Non accordé — explorateur indisponible</string>
+    <string name="btn_files_access">Autoriser l\'accès aux fichiers</string>
+
     <!-- V0.7 — notification persistante du Foreground Service -->
     <string name="notif_channel_name">Serveur PhoneLink</string>
     <string name="notif_channel_desc">Notification du serveur PhoneLink Companion en cours d\'exécution.</string>

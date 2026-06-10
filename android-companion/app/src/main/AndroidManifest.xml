@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <!-- Ouvrir un socket d'écoute local + lire l'IP Wi-Fi pour l'afficher. -->
     <uses-permission android:name="android.permission.INTERNET" />
@@ -30,11 +31,32 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!--
+      V1.0 — Explorateur de fichiers (/v1/files/*). Accès limité dans le code
+      aux dossiers publics (Download, DCIM, Pictures, Movies, Music, Documents)
+      via FileRepository (canonicalisation + racines autorisées).
+      - Android ≤ 9 : READ/WRITE_EXTERNAL_STORAGE (runtime) ;
+      - Android 10 : requestLegacyExternalStorage (ci-dessous) ;
+      - Android 11+ : MANAGE_EXTERNAL_STORAGE (« Accès à tous les fichiers »),
+        accordé manuellement par l'utilisateur via le bouton dédié de
+        MainActivity (réglage système, pas de dialogue runtime).
+    -->
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
+    <uses-permission
+        android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
+
     <application
         android:allowBackup="false"
         android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@style/Theme.PhoneLinkCompanion"
+        android:requestLegacyExternalStorage="true"
         android:usesCleartextTraffic="true">
 
         <activity

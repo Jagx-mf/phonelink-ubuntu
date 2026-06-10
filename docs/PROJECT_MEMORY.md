@@ -631,3 +631,100 @@ Statut :
 V0.6 validée.
 Doublons SMS/MMS/RCS corrigés, comportement rapproché de KDE Connect.
 Reste : noms MMS-only vides (hors scope), RemoteInput / réponse RCS (V0.6.1+).
+
+---
+
+## V1.0 — Phases 1–4 (implémentées le 2026-06-10, validation terrain à faire)
+
+Branche : `feat/full-phone-link-completion-test`.
+
+### Phase 1 — Explorateur de fichiers Android
+
+Android (`FileRepository.kt` + routes dans `CompanionServer.kt`, token requis) :
+
+- `GET /v1/files/roots` — racines publiques autorisées (Download, DCIM,
+  Pictures, Movies, Music, Documents) ;
+- `GET /v1/files/list?path=…` — `{path, parent, items:[{name, path, is_dir,
+  size, modified, mime}]}` ; `parent` vide à la racine d'un dossier autorisé ;
+- `GET /v1/files/download?path=…` — binaire en streaming
+  (`Content-Disposition` fourni) ;
+- `POST /v1/files/upload?path=…&name=…` — corps brut octet-stream lu
+  directement sur le flux de session (pas de `parseBody`), refus d'écraser ;
+- `POST /v1/files/mkdir {path, name}` / `delete {path}` (récursif, racines
+  protégées) / `rename {path, new_name}` (même dossier).
+
+Sécurité : canonicalisation (`canonicalFile`) + vérification sous racine,
+refus de `..`, noms sans séparateur ; toutes les exceptions avalées (le
+Foreground Service ne crashe jamais). Permission : MANAGE_EXTERNAL_STORAGE
+(Android 11+, bouton dans MainActivity → réglage système),
+READ/WRITE_EXTERNAL_STORAGE + `requestLegacyExternalStorage` avant.
+`/v1/health` expose `files_permission` et `contacts_permission` (additif).
+
+Ubuntu : `app/ui/files_window.py` (navigation, retour parent, rafraîchir,
+télécharger → `~/Téléchargements/PhoneLinkUbuntu` via XDG (`app/core/files.py`,
+noms anti-collision), envoyer un fichier, nouveau dossier, renommer, supprimer
+avec confirmation ; tout en threads + `GLib.idle_add`). Bridge :
+`list_file_roots`, `list_files`, `download_file` (streaming 64 Ko),
+`upload_file` (urllib avec corps fichier), `make_dir`, `delete_path`,
+`rename_path` dans `android_bridge.py`.
+
+### Phase 2 — Contacts
+
+Android (`ContactsRepository.kt`) : `GET /v1/contacts`,
+`GET /v1/contacts/search?q=…` (filtre nom/numéro), JSON
+`{id, display_name, phones[], emails[], photo_available}` (limite 2000) ;
+`POST /v1/call/start {phone_number}` → **ACTION_DIAL** (jamais ACTION_CALL),
+le dialer s'ouvre sur le téléphone, confirmation sur place. Limitation
+documentée : Android 10+ peut bloquer l'ouverture d'activité depuis
+l'arrière-plan écran verrouillé. Audio appel Ubuntu : dépendra du
+Bluetooth/HFP (futur).
+
+Ubuntu : `app/ui/contacts_window.py` (recherche insensible casse/accents,
+fiche avec numéros/emails, « Envoyer SMS », « Appeler ») ;
+`SmsWindow.compose_to(number, name)` ouvre le fil existant (numéros
+normalisés) ou passe en mode **nouveau message** (envoi par
+`phone_number` via `/v1/send`, avec la même confirmation d'envoi réel).
+
+### Phase 3 — Connexion sans câble (Wi-Fi)
+
+- `app/ui/connection_window.py` : modes USB/ADB forward vs Wi-Fi, champs
+  IP/port, « Tester la connexion » (`/v1/health` public), « Utiliser cette
+  connexion » (persiste `android_bridge_base_url` dans `config.json`,
+  reconstruit pont + backend SMS, rafraîchit `/v1/health`, relance le temps
+  réel) ; appairage PIN possible ensuite (le token est indépendant du
+  transport).
+- `app/core/discovery.py` : IP locale (UDP connect), scan /24 sur 8765
+  (TCP timeout 0,3 s, pool 64 threads), confirmation `/v1/health` → liste
+  d'appareils cliquables. Bloquant mais lancé en thread (jamais GTK).
+- Page principale : ligne « Connexion » = USB / ADB forward, Wi-Fi (IP) ou
+  indisponible. Bluetooth documenté : audio seulement. ADB USB = fallback.
+
+### Phase 4 — UX
+
+Page principale réorganisée (Adwaita + GTK pur) : Téléphone Android (avec
+ligne Connexion), Communication (Messages, Contacts, Notifications), Fichiers
+et photos (Fichiers Android, Import, Galerie, Dossier), Connexion (fenêtre
+Connexion, Appairage), Audio et affichage (scrcpy, Bluetooth, pavucontrol,
+mode appel, diagnostic), ADB Wi-Fi (avancé).
+
+### Corrections au passage
+
+- `_save_phone_config` / `_save_wifi_config` (main_window) reconstruisaient la
+  config avec les valeurs par défaut → **perte du token/URL d'appairage** dès
+  que la MAC ou l'hôte ADB changeait. Corrigé avec `dataclasses.replace`
+  sur la config relue depuis le disque.
+
+### Tests effectués (2026-06-10)
+
+- `python3 -m py_compile` sur tous les fichiers `app/` + `main.py` : OK ;
+- smoke test mock : racines/listing/contacts/appel/download (erreurs propres) ;
+- instanciation de `MainWindow` (GTK réel) : OK ;
+- build Android **à faire via Android Studio** (gradle absent de la machine).
+
+### Limites V1.0
+
+- RemoteInput / envoi RCS hors scope ; ouverture du dialer possiblement
+  bloquée app en arrière-plan (Android 10+) ; pas de transport Bluetooth ;
+  token/PIN en mémoire côté Android ; suppression récursive des dossiers
+  (confirmation UI, racines protégées) ; reconnexion Wi-Fi automatique en cas
+  de changement d'IP non implémentée (re-scan manuel).

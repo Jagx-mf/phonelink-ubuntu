@@ -177,6 +177,39 @@ class BridgeEvent:
 
 
 @dataclass(frozen=True)
+class AndroidFileEntry:
+    """Un fichier ou dossier Android renvoyé par ``/files/roots``/``/files/list``."""
+    name: str
+    path: str
+    is_dir: bool
+    size: int = 0
+    modified: Optional[datetime] = None
+    mime: str = ""
+
+
+@dataclass(frozen=True)
+class AndroidFileListing:
+    """Contenu d'un dossier Android (``GET /files/list``).
+
+    ``parent`` est vide quand on est à la racine d'un dossier autorisé : l'UI
+    revient alors à la liste des racines.
+    """
+    path: str
+    parent: str
+    items: list["AndroidFileEntry"] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class AndroidContact:
+    """Un contact Android renvoyé par ``GET /contacts`` (V1.0)."""
+    id: str
+    display_name: str
+    phones: tuple[str, ...] = ()
+    emails: tuple[str, ...] = ()
+    photo_available: bool = False
+
+
+@dataclass(frozen=True)
 class BridgeConversation:
     """Résumé de conversation renvoyé par ``GET /conversations``."""
     id: str
@@ -457,7 +490,170 @@ class AndroidBridge:
         logger.info("android_bridge: appairage réussi (token reçu)")
         return token
 
+    # ----- fichiers Android (V1.0 — Phase 1) ------------------------------
+
+    #: Timeout réseau des transferts de fichiers (gros fichiers possibles).
+    FILE_TRANSFER_TIMEOUT_S = 300.0
+
+    def list_file_roots(self) -> list[AndroidFileEntry]:
+        """Racines autorisées de l'explorateur (``GET /files/roots``).
+
+        En mode mock, renvoie les racines fictives (UI développable sans
+        téléphone). En HTTP, lève :class:`BridgeError` si la permission
+        « Accès à tous les fichiers » n'est pas accordée côté Android
+        (HTTP 403 ``files_permission_missing``).
+        """
+        if self.mode is BridgeMode.MOCK:
+            return self._mock.file_roots()
+        data = self._request("GET", "/files/roots")
+        return [_parse_file_entry(e) for e in data.get("roots", [])]
+
+    def list_files(self, path: str) -> AndroidFileListing:
+        """Contenu d'un dossier Android (``GET /files/list?path=…``)."""
+        if self.mode is BridgeMode.MOCK:
+            return self._mock.file_listing(path)
+        data = self._request("GET", "/files/list", params={"path": path})
+        return AndroidFileListing(
+            path=str(data.get("path", path)),
+            parent=str(data.get("parent", "")),
+            items=[_parse_file_entry(e) for e in data.get("items", [])],
+        )
+
+    def download_file(self, path: str, dest: str) -> str:
+        """Télécharge un fichier Android vers ``dest`` (chemin local complet).
+
+        Streaming par blocs de 64 Ko : jamais le fichier entier en mémoire.
+        Renvoie le chemin local écrit. Lève :class:`BridgeError` sur échec
+        (et supprime tout fichier partiel).
+        """
+        if self.mode is BridgeMode.MOCK:
+            raise BridgeError("Téléchargement indisponible en mode démo")
+        url = self._build_url("/files/download", {"path": path})
+        req = urllib.request.Request(url, headers=self._headers(), method="GET")
+        try:
+            with urllib.request.urlopen(
+                req, timeout=self.FILE_TRANSFER_TIMEOUT_S
+            ) as resp, open(dest, "wb") as out:
+                while True:
+                    chunk = resp.read(64 * 1024)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+        except urllib.error.HTTPError as exc:
+            _remove_partial(dest)
+            detail = _extract_error(_safe_read(exc)) or exc.reason or "erreur HTTP"
+            raise BridgeError(
+                f"HTTP {exc.code} sur /files/download: {detail}", status=exc.code
+            ) from exc
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            _remove_partial(dest)
+            raise BridgeError(f"Téléchargement échoué: {exc}") from exc
+        logger.info("android_bridge: fichier téléchargé %s → %s", path, dest)
+        return dest
+
+    def upload_file(self, local_path: str, remote_dir: str) -> None:
+        """Envoie un fichier local vers un dossier Android (``POST /files/upload``).
+
+        Corps brut ``application/octet-stream`` (streaming urllib depuis le
+        fichier ouvert), nom et dossier cible en query-string. Lève
+        :class:`BridgeError` sur refus (dossier interdit, fichier existant…).
+        """
+        if self.mode is BridgeMode.MOCK:
+            raise BridgeError("Envoi de fichier indisponible en mode démo")
+        name = os.path.basename(local_path)
+        size = os.path.getsize(local_path)
+        url = self._build_url("/files/upload", {"path": remote_dir, "name": name})
+        headers = self._headers()
+        headers["Content-Type"] = "application/octet-stream"
+        headers["Content-Length"] = str(size)
+        with open(local_path, "rb") as handle:
+            req = urllib.request.Request(
+                url, data=handle, headers=headers, method="POST"
+            )
+            try:
+                with urllib.request.urlopen(
+                    req, timeout=self.FILE_TRANSFER_TIMEOUT_S
+                ) as resp:
+                    raw = resp.read()
+            except urllib.error.HTTPError as exc:
+                detail = _extract_error(_safe_read(exc)) or exc.reason or "erreur HTTP"
+                raise BridgeError(
+                    f"HTTP {exc.code} sur /files/upload: {detail}", status=exc.code
+                ) from exc
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                raise BridgeError(f"Envoi du fichier échoué: {exc}") from exc
+        logger.info("android_bridge: fichier envoyé %s → %s (%d octets)",
+                    local_path, remote_dir, size)
+
+    def make_dir(self, parent_path: str, name: str) -> None:
+        """Crée ``parent_path/name`` sur le téléphone (``POST /files/mkdir``)."""
+        if self.mode is BridgeMode.MOCK:
+            raise BridgeError("Création de dossier indisponible en mode démo")
+        self._request(
+            "POST", "/files/mkdir", json_body={"path": parent_path, "name": name}
+        )
+
+    def delete_path(self, path: str) -> None:
+        """Supprime un fichier/dossier Android (``POST /files/delete``)."""
+        if self.mode is BridgeMode.MOCK:
+            raise BridgeError("Suppression indisponible en mode démo")
+        self._request("POST", "/files/delete", json_body={"path": path})
+
+    def rename_path(self, path: str, new_name: str) -> None:
+        """Renomme un fichier/dossier dans son dossier (``POST /files/rename``)."""
+        if self.mode is BridgeMode.MOCK:
+            raise BridgeError("Renommage indisponible en mode démo")
+        self._request(
+            "POST", "/files/rename", json_body={"path": path, "new_name": new_name}
+        )
+
+    # ----- contacts & appels (V1.0 — Phase 2) ------------------------------
+
+    def list_contacts(self, query: Optional[str] = None) -> list[AndroidContact]:
+        """Contacts Android (``GET /contacts`` ou ``/contacts/search?q=…``).
+
+        En mode mock, renvoie quelques contacts fictifs cohérents avec les
+        conversations de démo. En HTTP, lève :class:`BridgeError` si
+        READ_CONTACTS n'est pas accordée (403 ``contacts_permission_missing``).
+        """
+        if self.mode is BridgeMode.MOCK:
+            return self._mock.contacts(query)
+        if query:
+            data = self._request("GET", "/contacts/search", params={"q": query})
+        else:
+            data = self._request("GET", "/contacts")
+        return [_parse_contact(c) for c in data.get("contacts", [])]
+
+    def start_call(self, phone_number: str) -> tuple[bool, str]:
+        """Ouvre le dialer Android avec ce numéro (``POST /call/start``).
+
+        ACTION_DIAL côté Android : l'appel doit être **confirmé sur le
+        téléphone** (jamais lancé à distance). Renvoie ``(ok, detail)`` sans
+        jamais lever — un échec d'appel ne doit pas casser l'UI.
+        """
+        number = (phone_number or "").strip()
+        if not number:
+            return False, "Numéro vide"
+        if self.mode is BridgeMode.MOCK:
+            return False, "Appel indisponible en mode démo"
+        try:
+            data = self._request(
+                "POST", "/call/start", json_body={"phone_number": number}
+            )
+        except BridgeError as exc:
+            return False, str(exc)
+        if data.get("ok"):
+            return True, "Dialer ouvert sur le téléphone — confirmez l'appel"
+        return False, str(data.get("error") or "Échec de l'ouverture du dialer")
+
     # ----- transport HTTP (urllib, stdlib) -------------------------------
+
+    def _headers(self) -> dict[str, str]:
+        """En-têtes communs (User-Agent + Bearer) pour les requêtes brutes."""
+        headers = {"User-Agent": USER_AGENT}
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        return headers
 
     def _build_url(self, path: str, params: Optional[dict]) -> str:
         """Construire ``base_url + API_PREFIX + path`` avec query-string encodée."""
@@ -641,6 +837,49 @@ def _parse_event(raw: dict) -> BridgeEvent:
     )
 
 
+def _safe_read(exc: urllib.error.HTTPError) -> bytes:
+    """Lit le corps d'une HTTPError sans jamais lever (best-effort)."""
+    try:
+        return exc.read()
+    except Exception:  # pragma: no cover - lecture best-effort
+        return b""
+
+
+def _remove_partial(path: str) -> None:
+    """Supprime un fichier partiellement téléchargé (best-effort)."""
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def _parse_file_entry(raw: dict) -> AndroidFileEntry:
+    try:
+        size = int(raw.get("size", 0) or 0)
+    except (ValueError, TypeError):
+        size = 0
+    return AndroidFileEntry(
+        name=str(raw.get("name", "")),
+        path=str(raw.get("path", "")),
+        is_dir=bool(raw.get("is_dir", False)),
+        size=size,
+        modified=_epoch_ms_to_dt(raw.get("modified")),
+        mime=str(raw.get("mime", "")),
+    )
+
+
+def _parse_contact(raw: dict) -> AndroidContact:
+    phones = raw.get("phones")
+    emails = raw.get("emails")
+    return AndroidContact(
+        id=str(raw.get("id", "")),
+        display_name=str(raw.get("display_name", "")),
+        phones=tuple(str(p) for p in phones) if isinstance(phones, list) else (),
+        emails=tuple(str(e) for e in emails) if isinstance(emails, list) else (),
+        photo_available=bool(raw.get("photo_available", False)),
+    )
+
+
 def _parse_conversation(raw: dict) -> BridgeConversation:
     return BridgeConversation(
         id=str(raw.get("id", "")),
@@ -702,6 +941,75 @@ class _MockData:
                 outgoing=outgoing,
             )
             for (mins, outgoing, body) in items
+        ]
+
+    def file_roots(self) -> list[AndroidFileEntry]:
+        """Racines fictives pour développer l'UI sans téléphone."""
+        now = datetime.now()
+        return [
+            AndroidFileEntry(
+                name=name,
+                path=f"/storage/emulated/0/{name}",
+                is_dir=True,
+                modified=now - timedelta(days=2),
+            )
+            for name in ("Download", "DCIM", "Pictures", "Documents")
+        ]
+
+    def file_listing(self, path: str) -> AndroidFileListing:
+        """Listing fictif : quelques fichiers plausibles dans chaque racine."""
+        now = datetime.now()
+        items = [
+            AndroidFileEntry(
+                name="photo_vacances.jpg",
+                path=f"{path}/photo_vacances.jpg",
+                is_dir=False,
+                size=2_348_112,
+                modified=now - timedelta(hours=5),
+                mime="image/jpeg",
+            ),
+            AndroidFileEntry(
+                name="document.pdf",
+                path=f"{path}/document.pdf",
+                is_dir=False,
+                size=182_400,
+                modified=now - timedelta(days=1),
+                mime="application/pdf",
+            ),
+            AndroidFileEntry(
+                name="Sous-dossier",
+                path=f"{path}/Sous-dossier",
+                is_dir=True,
+                modified=now - timedelta(days=3),
+            ),
+        ]
+        # parent vide si on est à une racine fictive (revient aux racines).
+        parent = "" if path.count("/") <= 3 else path.rsplit("/", 1)[0]
+        return AndroidFileListing(path=path, parent=parent, items=items)
+
+    def contacts(self, query: Optional[str] = None) -> list[AndroidContact]:
+        """Contacts fictifs, cohérents avec les conversations de démo."""
+        seed = [
+            AndroidContact(
+                id="1", display_name="Maman",
+                phones=("+33 6 12 34 56 78",), emails=("maman@example.org",),
+            ),
+            AndroidContact(
+                id="2", display_name="Léa",
+                phones=("+33 6 98 76 54 32",),
+            ),
+            AndroidContact(
+                id="3", display_name="Thomas (collègue)",
+                phones=("+33 7 11 22 33 44",), emails=("thomas@example.org",),
+            ),
+        ]
+        needle = (query or "").strip().lower()
+        if not needle:
+            return seed
+        return [
+            c for c in seed
+            if needle in c.display_name.lower()
+            or any(needle in p for p in c.phones)
         ]
 
     def conversations(self) -> list[BridgeConversation]:
@@ -925,3 +1233,39 @@ def send_message(
     return get_bridge().send_message(
         body, conversation_id=conversation_id, phone_number=phone_number
     )
+
+
+def list_file_roots() -> list[AndroidFileEntry]:
+    return get_bridge().list_file_roots()
+
+
+def list_files(path: str) -> AndroidFileListing:
+    return get_bridge().list_files(path)
+
+
+def download_file(path: str, dest: str) -> str:
+    return get_bridge().download_file(path, dest)
+
+
+def upload_file(local_path: str, remote_dir: str) -> None:
+    return get_bridge().upload_file(local_path, remote_dir)
+
+
+def make_dir(parent_path: str, name: str) -> None:
+    return get_bridge().make_dir(parent_path, name)
+
+
+def delete_path(path: str) -> None:
+    return get_bridge().delete_path(path)
+
+
+def rename_path(path: str, new_name: str) -> None:
+    return get_bridge().rename_path(path, new_name)
+
+
+def list_contacts(query: Optional[str] = None) -> list[AndroidContact]:
+    return get_bridge().list_contacts(query)
+
+
+def start_call(phone_number: str) -> tuple[bool, str]:
+    return get_bridge().start_call(phone_number)

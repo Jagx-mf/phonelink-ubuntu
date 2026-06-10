@@ -1,5 +1,6 @@
 """Main application window for PhoneLink Ubuntu."""
 
+import dataclasses
 import threading
 from typing import Optional
 
@@ -27,6 +28,9 @@ from app.core.config import PhoneLinkConfig, load_config, save_config
 from app.ui.gallery_window import GalleryWindow
 from app.ui.sms_window import SmsWindow
 from app.ui.notifications_window import NotificationsWindow
+from app.ui.files_window import FilesWindow
+from app.ui.contacts_window import ContactsWindow
+from app.ui.connection_window import ConnectionWindow, describe_connection_mode
 from app.ui.widgets import show_dialog
 from app.utils.commands import launch_background, is_installed
 from app.utils.logger import get_logger
@@ -68,6 +72,8 @@ class MainWindow(_Base):
         self._val_server: Optional[Gtk.Label] = None
         self._val_sms: Optional[Gtk.Label] = None
         self._val_notif: Optional[Gtk.Label] = None
+        # V1.0 — mode de connexion à l'app compagnon (USB/Wi-Fi/indisponible)
+        self._val_connection: Optional[Gtk.Label] = None
 
         # ADB Wi-Fi host entry (set during _build_ui)
         self._wifi_host_entry: Optional[Gtk.Entry] = None
@@ -76,6 +82,10 @@ class MainWindow(_Base):
         # rafraîchir), écouteur d'événements long polling et notifications bureau.
         self._sms_window: Optional[SmsWindow] = None
         self._notif_window: Optional[NotificationsWindow] = None
+        # V1.0 — fenêtres Fichiers / Contacts / Connexion (une instance à la fois)
+        self._files_window: Optional[FilesWindow] = None
+        self._contacts_window: Optional[ContactsWindow] = None
+        self._connection_window: Optional[ConnectionWindow] = None
         self._notifier: Optional[event_listener.DesktopNotifier] = None
         #: conversation_id → timestamp (epoch s) du dernier message vu (anti-doublon).
         self._sms_seen: dict[str, float] = {}
@@ -136,46 +146,59 @@ class MainWindow(_Base):
         phone_group.set_description("Via l'app compagnon (appairage requis)")
         page.add(phone_group)
 
+        self._val_connection = self._adw_status_row(phone_group, "Connexion",       "—")
         self._val_battery  = self._adw_status_row(phone_group, "Batterie",          "—")
         self._val_charging = self._adw_status_row(phone_group, "Charge",            "—")
         self._val_server   = self._adw_status_row(phone_group, "Serveur Android",   "—")
         self._val_sms      = self._adw_status_row(phone_group, "SMS",               "—")
         self._val_notif    = self._adw_status_row(phone_group, "Notifications",     "—")
 
-        # ── Actions group ──
-        actions_group = Adw.PreferencesGroup()
-        actions_group.set_title("Actions")
-        page.add(actions_group)
-
-        actions = [
-            ("Appairer Android Companion",  "channel-secure-symbolic",             self._on_pair_android),
-            ("Scanner Bluetooth",           "network-wireless-acquiring-symbolic", self._on_scan_bt),
-            ("Reconnecter le téléphone",    "bluetooth-symbolic",                  self._on_reconnect),
-            ("Paramètres Bluetooth",        "preferences-system-symbolic",         self._on_bt_settings),
-            ("Ouvrir pavucontrol",          "audio-volume-high-symbolic",          self._on_pavucontrol),
-            ("Mode appel — guide",          "phone-symbolic",                      self._on_call_mode),
-            ("Afficher téléphone (scrcpy)", "video-display-symbolic",              self._on_scrcpy),
-            ("Messages (SMS)",              "user-available-symbolic",             self._on_open_sms),
-            ("Notifications Android",       "preferences-system-notifications-symbolic", self._on_open_notifications),
-            ("Importer photos",             "camera-photo-symbolic",               self._on_import_photos),
-            ("Galerie photos",              "image-x-generic-symbolic",            self._on_open_gallery),
-            ("Ouvrir dossier photos",       "folder-pictures-symbolic",            self._on_open_photos),
-            ("Diagnostic système",          "computer-symbolic",                   self._on_diagnostic),
+        # ── Sections d'actions (V1.0 — UX par cartes cohérentes) ──
+        sections = [
+            ("Communication", "Messages, contacts et notifications du téléphone", [
+                ("Messages (SMS)",        "user-available-symbolic",             self._on_open_sms),
+                ("Contacts",              "avatar-default-symbolic",             self._on_open_contacts),
+                ("Notifications Android", "preferences-system-notifications-symbolic", self._on_open_notifications),
+            ]),
+            ("Fichiers et photos", "Explorateur Android et import de photos", [
+                ("Fichiers Android",      "folder-remote-symbolic",              self._on_open_files),
+                ("Importer photos",       "camera-photo-symbolic",               self._on_import_photos),
+                ("Galerie photos",        "image-x-generic-symbolic",            self._on_open_gallery),
+                ("Ouvrir dossier photos", "folder-pictures-symbolic",            self._on_open_photos),
+            ]),
+            ("Connexion", "Appairage et transport vers l'app compagnon", [
+                ("Connexion Android (USB / Wi-Fi)", "network-workgroup-symbolic", self._on_open_connection),
+                ("Appairer Android Companion",      "channel-secure-symbolic",    self._on_pair_android),
+            ]),
+            ("Audio et affichage", "Bluetooth, son et miroir d'écran", [
+                ("Afficher téléphone (scrcpy)", "video-display-symbolic",              self._on_scrcpy),
+                ("Scanner Bluetooth",           "network-wireless-acquiring-symbolic", self._on_scan_bt),
+                ("Reconnecter le téléphone",    "bluetooth-symbolic",                  self._on_reconnect),
+                ("Paramètres Bluetooth",        "preferences-system-symbolic",         self._on_bt_settings),
+                ("Ouvrir pavucontrol",          "audio-volume-high-symbolic",          self._on_pavucontrol),
+                ("Mode appel — guide",          "phone-symbolic",                      self._on_call_mode),
+                ("Diagnostic système",          "computer-symbolic",                   self._on_diagnostic),
+            ]),
         ]
 
-        for title, icon_name, callback in actions:
-            row = Adw.ActionRow()
-            row.set_title(title)
-            row.set_activatable(True)
-            row.connect("activated", callback)
-            row.add_prefix(Gtk.Image.new_from_icon_name(icon_name))
-            row.add_suffix(Gtk.Image.new_from_icon_name("go-next-symbolic"))
-            actions_group.add(row)
+        for group_title, group_desc, actions in sections:
+            group = Adw.PreferencesGroup()
+            group.set_title(group_title)
+            group.set_description(group_desc)
+            page.add(group)
+            for title, icon_name, callback in actions:
+                row = Adw.ActionRow()
+                row.set_title(title)
+                row.set_activatable(True)
+                row.connect("activated", callback)
+                row.add_prefix(Gtk.Image.new_from_icon_name(icon_name))
+                row.add_suffix(Gtk.Image.new_from_icon_name("go-next-symbolic"))
+                group.add(row)
 
         # ── ADB Wi-Fi group ──
         wifi_group = Adw.PreferencesGroup()
         wifi_group.set_title("ADB Wi-Fi")
-        wifi_group.set_description("Accès photos sans câble")
+        wifi_group.set_description("Photos et scrcpy sans câble (avancé)")
         page.add(wifi_group)
 
         host_row = Adw.ActionRow()
@@ -261,7 +284,8 @@ class MainWindow(_Base):
             ("Sortie audio",   "…"),
             ("ADB",            "…"),
             ("scrcpy",         "…"),
-            # V0.8 — batterie + statut téléphone Android
+            # V0.8/V1.0 — connexion + batterie + statut téléphone Android
+            ("Connexion",      "—"),
             ("Batterie",       "—"),
             ("Charge",         "—"),
             ("Serveur Android","—"),
@@ -284,46 +308,61 @@ class MainWindow(_Base):
         (self._val_phone, self._val_bt, self._val_profile,
          self._val_source, self._val_sink,
          self._val_adb, self._val_scrcpy,
+         self._val_connection,
          self._val_battery, self._val_charging, self._val_server,
          self._val_sms, self._val_notif) = val_refs
 
-        sep = Gtk.Separator()
-        sep.set_margin_top(12)
-        sep.set_margin_bottom(8)
-        content.append(sep)
+        # Sections d'actions (V1.0 — mêmes groupes que la variante Adwaita).
+        sections = [
+            ("Communication", [
+                ("Messages (SMS)",        self._on_open_sms),
+                ("Contacts",              self._on_open_contacts),
+                ("Notifications Android", self._on_open_notifications),
+            ]),
+            ("Fichiers et photos", [
+                ("Fichiers Android",      self._on_open_files),
+                ("Importer photos",       self._on_import_photos),
+                ("Galerie photos",        self._on_open_gallery),
+                ("Ouvrir dossier photos", self._on_open_photos),
+            ]),
+            ("Connexion", [
+                ("Connexion Android (USB / Wi-Fi)", self._on_open_connection),
+                ("Appairer Android Companion",      self._on_pair_android),
+            ]),
+            ("Audio et affichage", [
+                ("Afficher téléphone (scrcpy)", self._on_scrcpy),
+                ("Scanner Bluetooth",           self._on_scan_bt),
+                ("Reconnecter le téléphone",    self._on_reconnect),
+                ("Paramètres Bluetooth",        self._on_bt_settings),
+                ("Ouvrir pavucontrol",          self._on_pavucontrol),
+                ("Mode appel — guide",          self._on_call_mode),
+                ("Diagnostic système",          self._on_diagnostic),
+            ]),
+        ]
+        for section_title, actions in sections:
+            sep = Gtk.Separator()
+            sep.set_margin_top(12)
+            sep.set_margin_bottom(8)
+            content.append(sep)
 
-        t2 = Gtk.Label(label="Actions")
-        t2.add_css_class("title-3")
-        t2.set_halign(Gtk.Align.START)
-        content.append(t2)
+            t2 = Gtk.Label(label=section_title)
+            t2.add_css_class("title-3")
+            t2.set_halign(Gtk.Align.START)
+            content.append(t2)
 
-        for label, callback in [
-            ("Appairer Android Companion",  self._on_pair_android),
-            ("Scanner Bluetooth",           self._on_scan_bt),
-            ("Reconnecter le téléphone",    self._on_reconnect),
-            ("Paramètres Bluetooth",        self._on_bt_settings),
-            ("Ouvrir pavucontrol",          self._on_pavucontrol),
-            ("Mode appel — guide",          self._on_call_mode),
-            ("Afficher téléphone (scrcpy)", self._on_scrcpy),
-            ("Messages (SMS)",              self._on_open_sms),
-            ("Notifications Android",       self._on_open_notifications),
-            ("Importer photos",             self._on_import_photos),
-            ("Galerie photos",              self._on_open_gallery),
-            ("Ouvrir dossier photos",       self._on_open_photos),
-            ("Diagnostic système",          self._on_diagnostic),
-        ]:
-            btn = Gtk.Button(label=label)
-            btn.set_hexpand(True)
-            btn.set_margin_top(2)
-            btn.connect("clicked", callback)
-            content.append(btn)
+            for label, callback in actions:
+                btn = Gtk.Button(label=label)
+                btn.set_hexpand(True)
+                btn.set_margin_top(2)
+                btn.connect("clicked", callback)
+                content.append(btn)
 
         sep2 = Gtk.Separator()
         sep2.set_margin_top(12)
         sep2.set_margin_bottom(8)
         content.append(sep2)
 
-        t3 = Gtk.Label(label="ADB Wi-Fi")
+        t3 = Gtk.Label(label="ADB Wi-Fi (avancé)")
         t3.add_css_class("title-3")
         t3.set_halign(Gtk.Align.START)
         content.append(t3)
@@ -423,12 +462,17 @@ class MainWindow(_Base):
 
     def _apply_device_status(self, device: "android_bridge.DeviceStatus") -> None:
         """Apply phone battery/status to UI labels (V0.8). Never crashes."""
+        mode = describe_connection_mode(self._config.android_bridge_base_url)
         if not device.reachable:
             for lbl in (self._val_battery, self._val_charging,
                         self._val_sms, self._val_notif):
                 _set_status_label(lbl, "—", ok=None)
             _set_status_label(self._val_server, "Indisponible", ok=False)
+            _set_status_label(self._val_connection,
+                              f"{mode} — indisponible", ok=False)
             return
+
+        _set_status_label(self._val_connection, f"{mode} ✓", ok=True)
 
         if device.battery_level >= 0:
             _set_status_label(self._val_battery, f"{device.battery_level} %", ok=None)
@@ -461,19 +505,22 @@ class MainWindow(_Base):
         threading.Thread(target=worker, daemon=True).start()
 
     def _save_phone_config(self, mac: str, name: str) -> None:
-        """Persist the detected phone when it changes."""
+        """Persist the detected phone when it changes.
+
+        ``dataclasses.replace`` préserve tous les autres champs (dont le token
+        d'appairage et l'URL du pont Android) — on ne reconstruit jamais la
+        config à partir de valeurs par défaut."""
         if not mac:
             return
-        next_config = PhoneLinkConfig(
-            phone_mac=mac,
-            phone_name=name,
-            adb_wifi_host=self._config.adb_wifi_host,
-            adb_wifi_port=self._config.adb_wifi_port,
-        )
-        if next_config == self._config:
+        # Repart de la config sur disque : l'appairage ou la fenêtre Connexion
+        # ont pu la modifier depuis le chargement initial.
+        on_disk = load_config()
+        next_config = dataclasses.replace(on_disk, phone_mac=mac, phone_name=name)
+        if next_config == on_disk and next_config == self._config:
             return
         self._config = next_config
-        save_config(next_config)
+        if next_config != on_disk:
+            save_config(next_config)
 
     def _on_reconnect(self, _):
         if not self._phone_mac:
@@ -564,6 +611,78 @@ class MainWindow(_Base):
         self._notif_window = None
         return False
 
+    # ── Fichiers / Contacts / Connexion (V1.0) ──
+
+    def _on_open_files(self, _):
+        if self._files_window is not None:
+            self._files_window.present()
+            return
+        files = FilesWindow(parent=self)
+        self._files_window = files
+        files.connect("close-request", self._on_files_closed)
+        files.present()
+
+    def _on_files_closed(self, *_):
+        self._files_window = None
+        return False
+
+    def _on_open_contacts(self, _):
+        if self._contacts_window is not None:
+            self._contacts_window.present()
+            return
+        contacts = ContactsWindow(parent=self, open_sms=self.open_sms_for_number)
+        self._contacts_window = contacts
+        contacts.connect("close-request", self._on_contacts_closed)
+        contacts.present()
+
+    def _on_contacts_closed(self, *_):
+        self._contacts_window = None
+        return False
+
+    def open_sms_for_number(self, phone_number: str, contact_name: str = "") -> None:
+        """Ouvre la fenêtre Messages préparée pour ``phone_number`` (Contacts).
+
+        Réutilise la fenêtre existante si elle est ouverte ; sinon en crée une.
+        ``compose_to`` ouvre le fil existant correspondant au numéro ou passe
+        en mode « nouveau message »."""
+        if self._sms_window is None:
+            sms = SmsWindow(parent=self)
+            self._sms_window = sms
+            sms.connect("close-request", self._on_sms_closed)
+        self._sms_window.compose_to(phone_number, contact_name)
+
+    def _on_open_connection(self, _):
+        if self._connection_window is not None:
+            self._connection_window.present()
+            return
+        connection = ConnectionWindow(
+            parent=self, on_applied=self._on_connection_applied
+        )
+        self._connection_window = connection
+        connection.connect("close-request", self._on_connection_closed)
+        connection.present()
+
+    def _on_connection_closed(self, *_):
+        self._connection_window = None
+        return False
+
+    def _on_connection_applied(self) -> None:
+        """Nouvelle URL de pont appliquée : tout l'écosystème se reconfigure.
+
+        Même chemin qu'après un appairage : backend SMS reconstruit, fenêtres
+        ouvertes rechargées, statut rafraîchi (⇒ /v1/health sur la nouvelle
+        URL) et écoute temps réel redémarrée."""
+        self._config = load_config()
+        if self._sms_window is not None:
+            try:
+                self._sms_window.reload_backend()
+            except Exception as exc:  # ne jamais casser l'accueil
+                logger.warning("Rechargement backend Messages échoué: %s", exc)
+        if self._notif_window is not None:
+            self._notif_window.reload_async()
+        self._refresh_status()
+        self._restart_realtime()
+
     def _on_open_photos(self, _):
         ok, msg = photos_core.open_local_folder()
         if not ok:
@@ -577,14 +696,12 @@ class MainWindow(_Base):
         return self._wifi_host_entry.get_text().strip()
 
     def _save_wifi_config(self, host: str, port: int) -> None:
-        """Persist the ADB Wi-Fi host/port when it changes."""
+        """Persist the ADB Wi-Fi host/port when it changes (préserve le reste)."""
         if host == self._config.adb_wifi_host and port == self._config.adb_wifi_port:
             return
-        self._config = PhoneLinkConfig(
-            phone_mac=self._config.phone_mac,
-            phone_name=self._config.phone_name,
-            adb_wifi_host=host,
-            adb_wifi_port=port,
+        on_disk = load_config()
+        self._config = dataclasses.replace(
+            on_disk, adb_wifi_host=host, adb_wifi_port=port
         )
         save_config(self._config)
 
@@ -761,6 +878,8 @@ class MainWindow(_Base):
 
     def _after_pairing(self) -> None:
         """Reconfigure tout l'écosystème après un appairage réussi."""
+        # La config sur disque a changé (token + mode http) : on resynchronise.
+        self._config = load_config()
         # Le backend SMS sera reconstruit (http + nouveau token) au prochain accès.
         sms_core.set_backend(None)
         # Si la fenêtre Messages est ouverte, elle bascule sur le nouveau backend.

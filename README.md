@@ -213,47 +213,111 @@ Limites restantes :
 - **connexion sans câble** pas encore finalisée (`adb forward` requis) ;
 - **design final** repoussé après validation fonctionnelle.
 
-## Roadmap — prochaines phases
+## V1.0 — Fichiers, Contacts, Wi-Fi sans câble, UX (en test)
 
-Détail complet : [docs/roadmap.md](docs/roadmap.md).
+Les quatre phases de la roadmap sont implémentées dans la branche
+`feat/full-phone-link-completion-test` (validation terrain à faire).
 
-**Phase 1 — Explorateur de fichiers Android.** Naviguer dans les fichiers du
-téléphone (DCIM, Download, Pictures, Movies, Documents), copier
-téléphone ↔ Ubuntu, déplacer/renommer/supprimer si sûr. API Companion propre
-privilégiée, ADB en fallback ; l'import photos existant n'est pas cassé.
+### Phase 1 — Explorateur de fichiers Android
 
-**Phase 2 — Contacts.** Bouton « Contacts » : liste, recherche, fiche simple,
-envoi SMS à un contact, appel si possible (préparation audio Bluetooth/HFP).
-`READ_CONTACTS` côté Android ; le module SMS n'est pas refondu.
+- Endpoints **protégés** (token requis) côté Companion, limités aux dossiers
+  publics (Download, DCIM, Pictures, Movies, Music, Documents), avec
+  canonicalisation des chemins et refus de `..` / hors-racine :
+  - `GET /v1/files/roots` — racines autorisées ;
+  - `GET /v1/files/list?path=…` — contenu d'un dossier
+    (`{path, parent, items:[{name, path, is_dir, size, modified, mime}]}`) ;
+  - `GET /v1/files/download?path=…` — téléchargement binaire en streaming ;
+  - `POST /v1/files/upload?path=…&name=…` — upload binaire brut (octet-stream) ;
+  - `POST /v1/files/mkdir {path, name}` ;
+  - `POST /v1/files/delete {path}` (récursif, racines protégées) ;
+  - `POST /v1/files/rename {path, new_name}` (même dossier).
+- Permission Android : « Accès à tous les fichiers » (MANAGE_EXTERNAL_STORAGE)
+  sur Android 11+, bouton dédié dans l'app Companion ; READ/WRITE_EXTERNAL_STORAGE
+  + `requestLegacyExternalStorage` sur Android ≤ 10. `/v1/health` expose
+  `files_permission`.
+- Côté Ubuntu : fenêtre **« Fichiers Android »** (navigation, retour parent,
+  rafraîchir, télécharger, envoyer un fichier, nouveau dossier, renommer,
+  supprimer avec confirmation, tailles/dates lisibles, tout en threads).
+  Destination des téléchargements : `~/Téléchargements/PhoneLinkUbuntu`
+  (XDG `DOWNLOAD`). L'import photos ADB existant est inchangé.
 
-**Phase 3 — Connexion sans câble.** Wi-Fi prioritaire (découverte réseau local,
-appairage, serveur joignable sans `adb forward`, config IP/port côté Ubuntu,
-reconnexion auto), Bluetooth en complément éventuel, ADB USB en fallback.
+### Phase 2 — Contacts
 
-**Phase 4 — Design / UX finale.** Interface modernisée (cartes
-téléphone/statut/messages/notifications, icônes, thème cohérent), meilleures
-fenêtres Messages et Notifications, captures d'écran dans le README, préparation
-d'une version installable. **Repoussée après fiabilisation fonctionnelle.**
+- Endpoints protégés : `GET /v1/contacts`, `GET /v1/contacts/search?q=…`
+  (`{id, display_name, phones[], emails[], photo_available}`) et
+  `POST /v1/call/start {phone_number}`.
+- L'appel utilise **ACTION_DIAL** : le dialer s'ouvre sur le téléphone avec le
+  numéro prérempli, l'appel est confirmé **sur le téléphone** (jamais
+  ACTION_CALL). L'audio côté Ubuntu dépendra du Bluetooth/HFP (plus tard).
+- Côté Ubuntu : fenêtre **« Contacts »** (recherche nom/numéro, fiche avec
+  numéros + emails, bouton « Envoyer SMS » qui ouvre la fenêtre Messages sur le
+  fil existant ou en mode **nouveau message** par numéro, bouton « Appeler »).
+
+### Phase 3 — Connexion sans câble (Wi-Fi)
+
+- Fenêtre **« Connexion Android »** : choix USB/ADB forward
+  (`http://127.0.0.1:8765`) ou **Wi-Fi** (`http://IP_TELEPHONE:8765`), champs
+  IP/port, **Tester la connexion** (`/v1/health`), **Utiliser cette connexion**
+  (persisté dans `config.json`, pont + backend SMS + temps réel reconfigurés
+  immédiatement), et **découverte automatique** (scan léger du /24 local sur le
+  port 8765, confirmation par `/v1/health`, sans bloquer GTK).
+- L'appairage PIN reste possible après bascule Wi-Fi ; le token persiste entre
+  les transports. ADB USB reste le fallback. Le Bluetooth reste réservé à
+  l'audio (la synchronisation sans câble passe par le Wi-Fi).
+- La fenêtre principale affiche le mode courant : **USB / ADB forward**,
+  **Wi-Fi (IP)** ou **indisponible**.
+
+### Phase 4 — UX
+
+- Page principale réorganisée en sections : **Téléphone Android** (connexion,
+  batterie, serveur, SMS, notifications), **Communication** (Messages,
+  Contacts, Notifications), **Fichiers et photos**, **Connexion**,
+  **Audio et affichage**, ADB Wi-Fi (avancé). Icônes GTK symboliques, états
+  OK ✓ / indisponible / « — » plus clairs, dans les variantes Adwaita et GTK pur.
+
+### Limites restantes (V1.0)
+
+- `RemoteInput` / envoi RCS toujours **hors scope** ;
+- l'ouverture du dialer (`/v1/call/start`) peut être bloquée par Android 10+
+  quand l'app Companion est en arrière-plan écran éteint (limitation système) ;
+- pas de transport Bluetooth pour la synchronisation (Wi-Fi ou ADB) ;
+- token/PIN toujours en mémoire côté Android (re-appairage après redémarrage
+  du service) ;
+- la suppression de fichiers est récursive pour les dossiers — confirmation
+  explicite côté UI, racines non supprimables.
 
 ## Structure du projet
 
 ```
 phonelink-ubuntu/
-├── main.py                  ← Point d'entrée
+├── main.py                      ← Point d'entrée
 ├── app/
 │   ├── ui/
-│   │   ├── main_window.py   ← Fenêtre principale
-│   │   └── widgets.py       ← Helpers UI
+│   │   ├── main_window.py       ← Fenêtre principale (sections V1.0)
+│   │   ├── sms_window.py        ← Messages (SMS/MMS/RCS + compose_to)
+│   │   ├── notifications_window.py ← Notifications Android
+│   │   ├── files_window.py      ← Fichiers Android (V1.0)
+│   │   ├── contacts_window.py   ← Contacts (V1.0)
+│   │   ├── connection_window.py ← Connexion USB/Wi-Fi + scan (V1.0)
+│   │   ├── gallery_window.py    ← Galerie photos
+│   │   └── widgets.py           ← Helpers UI
 │   ├── core/
-│   │   ├── bluetooth.py     ← bluetoothctl
-│   │   ├── audio.py         ← pactl
-│   │   ├── adb.py           ← adb
-│   │   ├── scrcpy.py        ← scrcpy
-│   │   ├── photos.py        ← adb pull + xdg-open
-│   │   └── system_checks.py ← diagnostic
+│   │   ├── android_bridge.py    ← client HTTP du Companion (SMS, fichiers, contacts…)
+│   │   ├── event_listener.py    ← temps réel (/v1/events) + notifications bureau
+│   │   ├── sms.py               ← modèle + backends SMS
+│   │   ├── files.py             ← dossier Téléchargements + helpers fichiers
+│   │   ├── discovery.py         ← scan réseau local (port 8765)
+│   │   ├── config.py            ← config JSON persistée
+│   │   ├── bluetooth.py         ← bluetoothctl
+│   │   ├── audio.py             ← pactl
+│   │   ├── adb.py               ← adb
+│   │   ├── scrcpy.py            ← scrcpy
+│   │   ├── photos.py            ← adb pull + xdg-open
+│   │   └── system_checks.py     ← diagnostic
 │   └── utils/
-│       ├── commands.py      ← subprocess wrapper
-│       └── logger.py        ← logging
+│       ├── commands.py          ← subprocess wrapper
+│       └── logger.py            ← logging
+├── android-companion/           ← app Android (NanoHTTPD, Foreground Service)
 └── docs/
     ├── architecture.md
     ├── installation.md
